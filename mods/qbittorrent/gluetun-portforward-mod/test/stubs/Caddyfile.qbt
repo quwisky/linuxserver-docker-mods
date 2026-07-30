@@ -1,0 +1,27 @@
+# qBittorrent stub, localhost-bypass mode: no auth required.
+#
+# Reports a STALE listening port and both toggles on, so the mod has something
+# to converge. Every request is logged, which is the point: `docker logs` shows
+# the exact form body the mod sent, so the payload shape can be asserted.
+:8080 {
+	log {
+		output stdout
+	}
+
+	handle /api/v2/app/version {
+		respond "v5.2.0" 200
+	}
+
+	handle /api/v2/app/preferences {
+		header Content-Type application/json
+		respond `{"listen_port":6881,"random_port":true,"upnp":true,"web_ui_port":8080,"dht":true}` 200
+	}
+
+	handle /api/v2/app/setPreferences {
+		respond "" 200
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}

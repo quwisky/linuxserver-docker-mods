@@ -17,7 +17,23 @@ numbered. See [Release channels](README.md#release-channels).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **qbittorrent-gluetun-portforward-mod** — keeps qBittorrent's listening port in
+  sync with the port gluetun forwards, through the WebUI API, live and with no
+  restart. Also forces `random_port` and `upnp` off, since a forwarded port is
+  pointless if the client then picks its own.
+
+  Beyond mirroring the Plex mod's gluetun handling, it deals with a
+  qBittorrent-specific problem: the client does not reliably re-open its
+  listening socket after the tunnel drops, so it can hold the right port number
+  and still not be listening on it. When gluetun reports no port, the next port
+  is written **even if unchanged**, which nudges qBittorrent into re-binding.
+
+  Authentication is either qBittorrent's localhost bypass or a permanent WebUI
+  password. The temporary `admin` password the image prints on start is
+  regenerated every restart, so it cannot be used; with neither configured the
+  mod reports the 403 once and names both fixes.
 
 ## [2026-07-30]
 

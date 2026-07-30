@@ -1,0 +1,23 @@
+# qBittorrent rejecting the credentials the way it actually does: HTTP 200 with
+# the body "Fails.", not an error status. A client that only inspects the status
+# code concludes it is logged in and then loops on 403 forever.
+#
+# Expect the mod to name the credentials as wrong, and to mention that the
+# temporary admin password is regenerated on every restart so it cannot be used.
+:8080 {
+	log {
+		output stdout
+	}
+
+	handle /api/v2/auth/login {
+		respond "Fails." 200
+	}
+
+	handle /api/v2/app/version {
+		respond "Forbidden" 403
+	}
+
+	handle {
+		respond "Forbidden" 403
+	}
+}

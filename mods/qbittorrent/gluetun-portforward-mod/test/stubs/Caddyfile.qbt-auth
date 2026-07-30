@@ -1,0 +1,39 @@
+# qBittorrent requiring a login: the API is refused without a SID cookie, and
+# POST /api/v2/auth/login issues one.
+#
+# Note that qBittorrent answers a WRONG password with HTTP 200 and the body
+# "Fails.", not with an error status — so a client that only checks the status
+# code thinks it logged in. The mod checks the body; this stub always succeeds,
+# and Caddyfile.qbt-authfail covers the rejection path.
+:8080 {
+	log {
+		output stdout
+	}
+
+	handle /api/v2/auth/login {
+		header Set-Cookie "SID=stubsession123; path=/; HttpOnly"
+		respond "Ok." 200
+	}
+
+	@authed header Cookie *SID=*
+
+	handle @authed {
+		handle /api/v2/app/preferences {
+			header Content-Type application/json
+			respond `{"listen_port":6881,"random_port":true,"upnp":true}` 200
+		}
+		handle /api/v2/app/setPreferences {
+			respond "" 200
+		}
+		handle /api/v2/app/version {
+			respond "v5.2.0" 200
+		}
+		handle {
+			respond "Not Found" 404
+		}
+	}
+
+	handle {
+		respond "Forbidden" 403
+	}
+}

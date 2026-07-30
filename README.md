@@ -18,6 +18,7 @@ the same content as these READMEs, rendered and searchable. ·
 | --- | --- | --- |
 | [plex-gluetun-portforward-mod](mods/plex/gluetun-portforward-mod/) | `linuxserver/plex` | Keeps Plex's public remote-access port in sync with the port [gluetun](https://github.com/qdm12/gluetun) forwards. |
 | [plex-vaapi-amdgpu-mod](mods/plex/vaapi-amdgpu-mod/) | `linuxserver/plex` | Bundles modern Mesa and libva from Alpine edge so AMD GPUs, including RDNA4/gfx1151, can hardware transcode. `linux/amd64` only. |
+| [qbittorrent-gluetun-portforward-mod](mods/qbittorrent/gluetun-portforward-mod/) | `linuxserver/qbittorrent` | Keeps qBittorrent's listening port in sync with the port [gluetun](https://github.com/qdm12/gluetun) forwards, and re-applies it after an outage. |
 
 Use one by adding it to `DOCKER_MODS` on the target container:
 

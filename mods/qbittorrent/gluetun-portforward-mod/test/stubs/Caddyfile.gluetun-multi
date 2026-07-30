@@ -1,0 +1,23 @@
+# Perfect Privacy / ProtonVPN multi-port shape, unsorted, with no "port" key at
+# all -- exactly what gluetun v3.39.0-v3.41.1 returns for 2+ ports.
+# Expect: picks 1024 (lowest) and logs "(all: 1024 2048 4096)".
+# With GLUETUN_PF_PORT_INDEX=2 it should pick 4096 instead.
+:8000 {
+	log {
+		output stdout
+	}
+
+	handle /v1/portforward {
+		header Content-Type application/json
+		respond `{"ports":[4096,1024,2048]}` 200
+	}
+
+	handle /v1/version {
+		header Content-Type application/json
+		respond `{"version":"v3.41.0"}` 200
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}

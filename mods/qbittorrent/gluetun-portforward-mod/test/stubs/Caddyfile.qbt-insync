@@ -1,0 +1,29 @@
+# qBittorrent stub already holding exactly what gluetun-ok forwards.
+#
+# Used to prove two opposite things:
+#   - steady state writes nothing at all
+#   - after gluetun reports no port, the next port IS re-applied even though the
+#     value is unchanged, because qBittorrent does not reliably re-open its
+#     listener after the tunnel drops
+:8080 {
+	log {
+		output stdout
+	}
+
+	handle /api/v2/app/version {
+		respond "v5.2.0" 200
+	}
+
+	handle /api/v2/app/preferences {
+		header Content-Type application/json
+		respond `{"listen_port":54321,"random_port":false,"upnp":false,"web_ui_port":8080}` 200
+	}
+
+	handle /api/v2/app/setPreferences {
+		respond "" 200
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}

@@ -1,0 +1,20 @@
+# qBittorrent with neither credentials nor the localhost bypass: every API call
+# is refused. qBittorrent answers 403 Forbidden here, not 401 — verified in
+# webapplication.cpp, which throws ForbiddenHTTPError for an unauthenticated
+# request to a private API.
+#
+# Expect the mod to print the two-option fix (tick the bypass, or set a
+# permanent password) exactly once, and never to spin.
+:8080 {
+	log {
+		output stdout
+	}
+
+	handle /api/v2/app/version {
+		respond "Forbidden" 403
+	}
+
+	handle {
+		respond "Forbidden" 403
+	}
+}
