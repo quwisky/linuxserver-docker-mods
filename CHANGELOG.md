@@ -17,35 +17,24 @@ numbered. See [Release channels](README.md#release-channels).
 
 ## [Unreleased]
 
-### Changed
+Nothing yet.
 
-- All GitHub Actions bumped to majors that declare Node 24, since the runners
-  now warn that Node 20 is deprecated: `checkout` v4→v7, `setup-python` v5→v7,
-  `upload-pages-artifact` v3→v5, `deploy-pages` v4→v5, the three `docker/setup-*`
-  and `login` actions v3→v4, and `build-push-action` v6→v7. Every input this
-  repo actually passes was checked against the new majors first.
-- Added a Dependabot config for `github-actions`, grouped into one monthly PR. A
-  pinned major keeps working long after the Node runtime it declares is
-  deprecated, and the only signal is a warning buried in a run log.
-
-### Fixed
-
-- Single-platform mods published a manifest `/docker-mods` cannot read, so they
-  never loaded. It fetches the manifest sending only
-  `application/vnd.docker.distribution.manifest.v2+json` and
-  `application/vnd.oci.image.index.v1+json`; a multi-platform build yields an OCI
-  index (accepted), but a single-platform build yields a bare OCI image manifest
-  (not accepted), and the registry answers `404 MANIFEST_UNKNOWN`. The mod then
-  falls back to its cache, so on a fresh container nothing happens and the log
-  says only `digest could not be fetched`.
-
-  This affected **plex-vaapi-amdgpu-mod**, which is `linux/amd64` only.
-  Single-platform mods now publish Docker media types, and every publish asserts
-  the manifest is readable with those exact Accept headers, so it cannot regress
-  silently. **Republish any single-platform mod to pick this up.**
+## [2026-07-30]
 
 ### Added
 
+- **plex-gluetun-portforward-mod** — keeps Plex's public remote-access port in
+  sync with the port [gluetun](https://github.com/qdm12/gluetun) forwards, via
+  Plex's `/:/prefs` API, live and with no restart. Handles every gluetun
+  response shape across releases, treats "no forwarded port" as a normal state
+  that leaves Plex untouched, and bounds writes four ways against Plex's rate
+  limiting on published mapping state.
+- **plex-vaapi-amdgpu-mod** — bundles current Mesa and libva from Alpine edge so
+  AMD GPUs, including RDNA4/gfx1151, can hardware transcode in Plex. Migrated
+  from its own repository; the GHCR package name is unchanged, so existing
+  `DOCKER_MODS` values keep working. `linux/amd64` only, and rebuilt monthly from
+  `master` so `:latest` keeps picking up new Mesa rather than freezing between
+  pushes.
 - **qbittorrent-gluetun-portforward-mod** — keeps qBittorrent's listening port in
   sync with the port gluetun forwards, through the WebUI API, live and with no
   restart. Also forces `random_port` and `upnp` off, since a forwarded port is
@@ -62,28 +51,11 @@ numbered. See [Release channels](README.md#release-channels).
   regenerated every restart, so it cannot be used; with neither configured the
   mod reports the 403 once and names both fixes.
 
-## [2026-07-30]
-
-### Added
-
-- **plex-gluetun-portforward-mod** — keeps Plex's public remote-access port in
-  sync with the port [gluetun](https://github.com/qdm12/gluetun) forwards, via
-  Plex's `/:/prefs` API, live and with no restart. Handles every gluetun
-  response shape across releases, treats "no forwarded port" as a normal state
-  that leaves Plex untouched, and bounds writes four ways against Plex's
-  rate limiting on published mapping state.
-- **plex-vaapi-amdgpu-mod** — bundles current Mesa and libva from Alpine edge so
-  AMD GPUs, including RDNA4/gfx1151, can hardware transcode in Plex. Migrated
-  from its own repository; the GHCR package name is unchanged, so existing
-  `DOCKER_MODS` values keep working. `linux/amd64` only.
 - One workflow per mod, each gated on its own directory, so touching one mod
   never runs another's tests. Shared logic lives once in a reusable workflow.
-- Nightly builds from `develop`, published as `:nightly`. The pin is the git
-  tree hash of the mod's directory, so an unchanged night resolves to a tag that
+- Nightly builds from `develop`, published as `:nightly`. The pin is the git tree
+  hash of the mod's directory, so an unchanged night resolves to a tag that
   already exists and the publish is skipped while the tests still run.
-- **plex-vaapi-amdgpu-mod** — a monthly rebuild of `master`, carried over from
-  its standalone repo, so `:latest` keeps picking up new Mesa rather than
-  freezing between pushes.
 - Custom-tag publishing: a manual run with the **tag** field filled in builds any
   branch and publishes it under that tag alone, without touching `:latest` or
   `:nightly`.
@@ -93,13 +65,39 @@ numbered. See [Release channels](README.md#release-channels).
 - A [documentation site](https://quwisky.github.io/linuxserver-docker-mods/)
   built with MkDocs Material and deployed to GitHub Pages, generated from the
   READMEs so there is no second copy to drift.
+- A Dependabot config for `github-actions`, grouped into one monthly PR. A pinned
+  major keeps working long after the Node runtime it declares is deprecated, and
+  the only signal is a warning buried in a run log.
+
+### Changed
+
+- All GitHub Actions moved to majors that declare Node 24, since the runners now
+  warn that Node 20 is deprecated: `checkout` v4→v7, `setup-python` v5→v7,
+  `upload-pages-artifact` v3→v5, `deploy-pages` v4→v5, the three `docker/setup-*`
+  and `login` actions v3→v4, and `build-push-action` v6→v7. Every input this repo
+  passes was checked against the new majors first.
+
+### Fixed
+
+- Single-platform mods published a manifest `/docker-mods` cannot read, so they
+  never loaded. It fetches the manifest sending only
+  `application/vnd.docker.distribution.manifest.v2+json` and
+  `application/vnd.oci.image.index.v1+json`; a multi-platform build yields an OCI
+  index (accepted), but a single-platform build yields a bare OCI image manifest
+  (not accepted), and the registry answers `404 MANIFEST_UNKNOWN`. The mod then
+  falls back to its cache, so on a fresh container nothing happens and the log
+  says only `digest could not be fetched`.
+
+  This affected **plex-vaapi-amdgpu-mod**, which is `linux/amd64` only.
+  Single-platform mods now publish Docker media types, and every publish asserts
+  the manifest is readable with those exact Accept headers, so it cannot regress
+  silently.
 
 ### Notes
 
 - Each mod is its own GHCR package named `<app>-<mod>`, composed from the two
-  directory levels of `mods/<app>/<mod>`. Packages are private when first
-  created — set visibility to public once per mod, or `/docker-mods` gets a 401
-  pulling the manifest.
+  directory levels of `mods/<app>/<mod>`. GHCR creates a new package private, and
+  `/docker-mods` cannot pull a private package — it gets a 401 on the manifest.
 - Licensed under MIT.
 
 [Unreleased]: https://github.com/quwisky/linuxserver-docker-mods/compare/master...develop
