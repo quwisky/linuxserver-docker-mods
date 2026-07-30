@@ -1,0 +1,21 @@
+# Plex rejects the token. Expect: the mod clears its cached token, logs
+# "rejected our token", and re-reads Preferences.xml (or the override) next poll
+# instead of dying.
+:32400 {
+	log {
+		output stdout
+	}
+
+	handle /identity {
+		header Content-Type application/xml
+		respond `<MediaContainer size="0" machineIdentifier="stub-machine-id"/>` 200
+	}
+
+	handle /:/prefs {
+		respond "" 401
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}

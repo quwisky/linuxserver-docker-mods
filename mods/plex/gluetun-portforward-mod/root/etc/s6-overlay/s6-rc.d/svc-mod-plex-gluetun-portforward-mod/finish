@@ -1,0 +1,38 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+#
+# $1 = exit code of ./run (256 if it was signalled), $2 = signal number.
+#
+# `exit 125` tells s6-supervise to bring the service permanently down instead of
+# restarting it. That is unrecoverable without recreating the container, so the
+# rule is: 125 only when the condition cannot change without a recreate.
+#
+# Qualifies:      GLUETUN_PF_ENABLED falsey, curl absent.
+# Does not:       server unclaimed (normal to do days later in the web UI),
+#                 gluetun 401 (fixable by editing config.toml and restarting
+#                 gluetun ALONE -- a 125 here would leave Plex broken with no
+#                 log explaining why), old gluetun, gluetun unreachable, Plex
+#                 down, Plex 400/429, missing jq, malformed numeric env vars,
+#                 gluetun reporting port 0 (a normal steady state, not an error).
+
+P="[mod-gluetun-portforward]"
+
+# Must stay in sync with falsey() in ./run
+enabled="${GLUETUN_PF_ENABLED:-true}"
+if [[ ${enabled,,} =~ ^(0|false|no|off|disable|disabled)$ ]]; then
+    exit 125
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+    echo "${P} **** curl missing, not restarting ****"
+    exit 125
+fi
+
+if [[ ${1} != "0" ]]; then
+    echo "${P} **** exited unexpectedly (status ${1}, signal ${2:-0}); s6 will restart it shortly ****"
+    # Throttle so a crash-on-startup cannot become a hot loop. Must stay well
+    # under s6-supervise's default timeout-finish of 5000 ms.
+    sleep 3
+fi
+
+exit 0

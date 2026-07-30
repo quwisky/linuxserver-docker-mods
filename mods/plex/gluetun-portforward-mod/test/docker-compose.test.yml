@@ -1,0 +1,77 @@
+# Integration harness: exercises the whole mod with no VPN, no Plex account and
+# no image build. Both endpoints the mod talks to are stubbed with Caddy, and the
+# service directory is bind-mounted straight into a real linuxserver/plex
+# container, bypassing /docker-mods entirely.
+#
+#   cd test
+#   docker compose -f docker-compose.test.yml up -d
+#   docker compose -f docker-compose.test.yml logs -f plex | grep mod-gluetun-portforward
+#
+# Inner loop after editing ./run on the host -- sub-second, no rebuild:
+#   docker compose -f docker-compose.test.yml exec plex \
+#     s6-svc -r /run/service/svc-mod-plex-gluetun-portforward-mod
+#
+# Service state:
+#   docker compose -f docker-compose.test.yml exec plex \
+#     s6-svstat /run/service/svc-mod-plex-gluetun-portforward-mod
+#
+# To swap a stub scenario, point the volume at another Caddyfile (see ./stubs)
+# and restart just that stub -- the mod re-converges on its next poll, no Plex
+# restart needed:
+#   docker compose -f docker-compose.test.yml restart gluetun-stub
+#
+# The Plex container does start a real PMS that will never be claimed. That is
+# fine: GLUETUN_PF_PLEX_TOKEN and GLUETUN_PF_PLEX_URL point the mod at the stub,
+# so the mod never touches the real PMS.
+
+name: plex-gluetun-pf-test
+
+services:
+  gluetun-stub:
+    image: caddy:2-alpine
+    container_name: pf-gluetun-stub
+    volumes:
+      # Swap for Caddyfile.gluetun-{zero,multi,legacy,401} to change scenario.
+      - ./stubs/Caddyfile.gluetun-ok:/etc/caddy/Caddyfile:ro
+    restart: unless-stopped
+
+  plex-stub:
+    image: caddy:2-alpine
+    container_name: pf-plex-stub
+    volumes:
+      # Swap for Caddyfile.plex-{401,429,400} to change scenario.
+      - ./stubs/Caddyfile.plex:/etc/caddy/Caddyfile:ro
+    restart: unless-stopped
+
+  plex:
+    image: lscr.io/linuxserver/plex:latest
+    container_name: pf-plex
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - VERSION=docker
+      # Point the mod at the stubs rather than at anything real.
+      - GLUETUN_PF_CONTROL_URL=http://gluetun-stub:8000
+      - GLUETUN_PF_PLEX_URL=http://plex-stub:32400
+      - GLUETUN_PF_PLEX_TOKEN=stub-token
+      # Fast enough to watch, slow enough that MIN_PUT_GAP still bites.
+      - GLUETUN_PF_INTERVAL=15
+      - GLUETUN_PF_RETRY_INTERVAL=5
+      - GLUETUN_PF_LOG_LEVEL=debug
+      # - GLUETUN_PF_PORT_INDEX=2
+      # - GLUETUN_PF_MANAGE_REMOTE_ACCESS=false
+      # - GLUETUN_PF_ENABLED=false
+    volumes:
+      # The mod, mounted directly. The host's 755 carries through, so a
+      # forgotten chmod +x fails here rather than in CI.
+      - ../root/etc/s6-overlay/s6-rc.d/svc-mod-plex-gluetun-portforward-mod:/etc/s6-overlay/s6-rc.d/svc-mod-plex-gluetun-portforward-mod:ro
+      - ../root/etc/s6-overlay/s6-rc.d/user/contents.d/svc-mod-plex-gluetun-portforward-mod:/etc/s6-overlay/s6-rc.d/user/contents.d/svc-mod-plex-gluetun-portforward-mod:ro
+      - pf-test-config:/config
+    depends_on:
+      - gluetun-stub
+      - plex-stub
+    restart: unless-stopped
+
+volumes:
+  pf-test-config:

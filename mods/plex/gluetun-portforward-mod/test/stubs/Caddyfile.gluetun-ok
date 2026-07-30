@@ -1,0 +1,26 @@
+# gluetun v3.41.2 shape: both keys present, port == ports[0].
+:8000 {
+	log {
+		output stdout
+	}
+
+	handle /v1/portforward {
+		header Content-Type application/json
+		respond `{"port":54321,"ports":[54321]}` 200
+	}
+
+	# v3.41.0+ turned the legacy route into a 301. The mod passes curl -L, so
+	# this exercises the redirect path.
+	handle /v1/openvpn/portforwarded {
+		redir /v1/portforward 301
+	}
+
+	handle /v1/version {
+		header Content-Type application/json
+		respond `{"version":"v3.41.2","commit":"stub","created":"stub"}` 200
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}

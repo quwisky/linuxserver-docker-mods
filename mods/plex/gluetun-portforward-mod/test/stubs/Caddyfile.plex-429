@@ -1,0 +1,35 @@
+# Plex rate-limits the write (the reported "Published Mapping State" 429).
+# Reads succeed so the mod keeps seeing a mismatch and keeps wanting to write.
+# Expect the backoff ladder in the log: 60s, 120s, 240s, ... capped at 900s,
+# with polling continuing throughout.
+:32400 {
+	log {
+		output stdout
+	}
+
+	handle /identity {
+		header Content-Type application/xml
+		respond `<MediaContainer size="0" machineIdentifier="stub-machine-id"/>` 200
+	}
+
+	@getprefs {
+		method GET
+		path /:/prefs
+	}
+	handle @getprefs {
+		header Content-Type application/xml
+		respond `<MediaContainer size="3"><Setting id="ManualPortMappingMode" type="bool" value="0" /><Setting id="ManualPortMappingPort" type="int" value="32400" /><Setting id="PublishServerOnPlexOnlineKey" type="bool" value="0" /></MediaContainer>` 200
+	}
+
+	@putprefs {
+		method PUT
+		path /:/prefs
+	}
+	handle @putprefs {
+		respond "Too Many Requests" 429
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}

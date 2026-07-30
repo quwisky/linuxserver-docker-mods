@@ -1,0 +1,21 @@
+# Port forwarding not ready: HTTP 200 with no usable port.
+# Expect: one "gluetun reports no forwarded port yet" line, and NO PUT to Plex.
+:8000 {
+	log {
+		output stdout
+	}
+
+	handle /v1/portforward {
+		header Content-Type application/json
+		respond `{"port":0,"ports":[]}` 200
+	}
+
+	handle /v1/version {
+		header Content-Type application/json
+		respond `{"version":"v3.41.2"}` 200
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}

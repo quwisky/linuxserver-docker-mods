@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# Verifies the 1:1 mapping between mods and their CI workflows.
+#
+# A mod lives at mods/<app>/<mod> and its id -- the workflow name, the GHCR
+# package name -- is <app>-<mod>.
+#
+# Per-mod workflows are the point of this repo's CI: each carries a `paths:`
+# filter so it runs only when its own mod changes. The cost of that design is
+# that a mod with no workflow is simply never built or tested, silently and
+# forever. This check is what makes that impossible.
+#
+#   ci/check-mod-workflows.sh
+#
+# MODS_DIR and WF_DIR can point at scratch directories so that a freshly
+# scaffolded mod can be validated before it is committed -- which is the only
+# way the generated `paths:` filter ever gets checked. The filter itself always
+# refers to the real `mods/` path, since that is what GitHub matches against.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${REPO}"
+
+MODS_DIR="${MODS_DIR:-mods}"
+WF_DIR="${WF_DIR:-.github/workflows}"
+rc=0
+
+err() { echo "::error::$*"; }
+
+# Parallel arrays rather than an associative array: this has to run on macOS,
+# which still ships bash 3.2.
+ids=()
+apps=()
+names=()
+for d in "${MODS_DIR}"/*/*/; do
+    [[ -f "${d}Dockerfile" ]] || continue
+    mod="$(basename "${d%/}")"
+    app="$(basename "$(dirname "${d%/}")")"
+    ids+=("${app}-${mod}")
+    apps+=("${app}")
+    names+=("${mod}")
+done
+
+workflows=()
+for f in "${WF_DIR}"/mod-*.yml; do
+    [[ -e ${f} ]] || continue
+    n="$(basename "${f}" .yml)"
+    workflows+=("${n#mod-}")
+done
+
+# Every mod needs a workflow.
+for i in "${!ids[@]}"; do
+    id="${ids[${i}]}"
+    app="${apps[${i}]}"
+    mod="${names[${i}]}"
+    f="${WF_DIR}/mod-${id}.yml"
+
+    if [[ ! -f ${f} ]]; then
+        err "mods/${app}/${mod} has no CI workflow. Nothing will ever build or test it."
+        echo "       create ${f} -- ci/new-mod.sh writes one, or copy an existing caller."
+        rc=1
+        continue
+    fi
+
+    # The caller must build THIS mod...
+    if ! grep -qE "^[[:space:]]+app:[[:space:]]+${app}[[:space:]]*$" "${f}"; then
+        err "${f} does not pass 'app: ${app}' to the reusable workflow."
+        rc=1
+    fi
+    if ! grep -qE "^[[:space:]]+mod:[[:space:]]+${mod}[[:space:]]*$" "${f}"; then
+        err "${f} does not pass 'mod: ${mod}' to the reusable workflow."
+        rc=1
+    fi
+    # ...and must be gated on this mod's own directory, or it would run for
+    # every push and defeat the whole arrangement.
+    if ! grep -qF "'mods/${app}/${mod}/**'" "${f}"; then
+        err "${f} has no paths filter for 'mods/${app}/${mod}/**'; it would run on unrelated changes."
+        rc=1
+    fi
+    # A caller that does not react to the reusable workflow changing will go
+    # stale without anyone noticing.
+    if ! grep -qF "'.github/workflows/_mod-ci.yml'" "${f}"; then
+        err "${f} should also trigger on '.github/workflows/_mod-ci.yml' so shared CI changes are exercised."
+        rc=1
+    fi
+    # No schedule means no nightly, silently and forever -- the same class of
+    # failure as having no workflow at all.
+    if ! grep -qE "^[[:space:]]+- cron:" "${f}"; then
+        err "${f} has no 'schedule: - cron:' entry, so ${id} would never get a nightly build."
+        rc=1
+    fi
+    # ...and a schedule that does not point at develop is not a nightly of
+    # anything useful.
+    if ! grep -qF "refs/heads/develop" "${f}"; then
+        err "${f} has a schedule but never references refs/heads/develop; its nightly would rebuild the default branch."
+        rc=1
+    fi
+done
+
+# And every workflow needs a mod, so renaming or moving a mod cannot leave a
+# caller pointing at a directory that no longer exists.
+for w in "${workflows[@]:-}"; do
+    [[ -z ${w} ]] && continue
+    found=0
+    for id in "${ids[@]:-}"; do
+        [[ ${w} == "${id}" ]] && found=1 && break
+    done
+    if ((!found)); then
+        err "${WF_DIR}/mod-${w}.yml has no matching mod under ${MODS_DIR}/<app>/<mod>."
+        rc=1
+    fi
+done
+
+# Two different app/mod splits can compose to the same id -- plex/foo-bar and
+# plex-foo/bar are both "plex-foo-bar" -- which is one GHCR package and one
+# workflow file, so each would overwrite the other's :latest.
+for i in "${!ids[@]}"; do
+    for j in "${!ids[@]}"; do
+        ((j <= i)) && continue
+        if [[ ${ids[${i}]} == "${ids[${j}]}" ]]; then
+            err "mods/${apps[${i}]}/${names[${i}]} and mods/${apps[${j}]}/${names[${j}]} both have id '${ids[${i}]}'."
+            echo "       they would share one GHCR package and one workflow file; rename one."
+            rc=1
+        fi
+    done
+done
+
+# Two mods scheduled on the same minute get queued together, and GitHub drops
+# scheduled runs under load. ci/new-mod.sh spreads them by hashing the id; this
+# catches a hand-edited collision.
+slots=""
+for id in "${ids[@]:-}"; do
+    [[ -z ${id} ]] && continue
+    f="${WF_DIR}/mod-${id}.yml"
+    [[ -f ${f} ]] || continue
+    while IFS= read -r slot; do
+        [[ -z ${slot} ]] && continue
+        slots="${slots}${slot}|${id}"$'\n'
+    done < <(sed -n "s/^[[:space:]]*- cron:[[:space:]]*'\([^']*\)'.*$/\1/p" "${f}")
+done
+
+while IFS= read -r dupe; do
+    [[ -z ${dupe} ]] && continue
+    owners="$(printf '%s' "${slots}" | awk -F'|' -v s="${dupe}" '$1==s {printf "%s ", $2}')"
+    err "these mods all run at cron '${dupe}', so GitHub queues them together: ${owners}"
+    echo "       stagger them; ci/new-mod.sh derives a slot from the mod id."
+    rc=1
+done < <(printf '%s' "${slots}" | awk -F'|' 'NF {print $1}' | sort | uniq -d)
+
+if ((rc == 0)); then
+    echo "**** ${#ids[@]} mod(s), each with a matching workflow ****"
+    for i in "${!ids[@]}"; do
+        echo "  mods/${apps[${i}]}/${names[${i}]} -> ${WF_DIR}/mod-${ids[${i}]}.yml"
+    done
+fi
+exit $rc

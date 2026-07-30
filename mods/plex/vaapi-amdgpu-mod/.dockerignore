@@ -1,0 +1,5 @@
+# The build context is this mod's directory, so only `root/` may reach the
+# image. Everything else here is repo/dev material.
+README.md
+test
+**/.DS_Store

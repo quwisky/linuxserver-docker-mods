@@ -1,0 +1,725 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+#===============================================================================
+# plex-gluetun-portforward-mod
+#
+# Polls gluetun's control server for the currently forwarded VPN port and keeps
+# Plex's "manually specify public port" settings in sync via Plex's HTTP API.
+#
+# Design constraints, deliberately chosen:
+#
+#  * No `set -e`, no `set -u`, no `set -o pipefail`. This is a supervised s6
+#    longrun that must never terminate on a transient error; `set -e` here would
+#    turn one failed curl into an s6-supervise hot restart loop. Instead every
+#    fallible call is checked explicitly and every global is initialised below,
+#    with shellcheck in CI catching what `set -u` would have.
+#
+#  * Writes nothing to disk, ever. Reads Preferences.xml only, and only to
+#    extract PlexOnlineToken. That makes LSIO_READ_ONLY_FS a non-event.
+#
+#  * Runs as the container's default identity: no s6-setuidgid, no lsiown. We
+#    create no files, so there is no ownership to get wrong, and this keeps
+#    LSIO_NON_ROOT_USER working with zero special-casing (following the usual
+#    `s6-setuidgid abc` idiom would actually have broken there).
+#
+#  * All state lives in shell variables. A restart is always safe: the loop
+#    re-reads Plex's actual settings and re-converges.
+#
+#  * Never restarts Plex. Never edits Preferences.xml. Never touches
+#    allowedNetworks or customConnections. Never unpublishes on port loss.
+#===============================================================================
+
+MOD="gluetun-portforward"
+P="[mod-${MOD}]"
+
+readonly MIN_PUT_GAP=10        # hard floor, seconds, between two PUTs to Plex
+readonly MAX_VERIFY_FAILS=3    # "PUT returned 200 but the value did not change"
+readonly CONNECT_TIMEOUT=5
+readonly BLOCK_ON_BAD_REQUEST=300
+readonly PUT_BACKOFF_CAP=900
+
+# gluetun routes, most-current first. /v1/openvpn/portforwarded is native on
+# <= v3.40.4 and 301-redirects to /v1/portforward on >= v3.41.0, so this pair
+# covers every released gluetun.
+readonly GT_PATHS=("/v1/portforward" "/v1/openvpn/portforwarded")
+
+#-------------------------------------------------------------------------------
+# Mutable state. Everything is initialised here so nothing is ever unset.
+#
+# IMPORTANT: functions that mutate any of these must never be called inside
+# $( ) -- a command substitution runs in a subshell and silently discards every
+# assignment. Only extract_ports(), plex_pref() and normalise_url() print to
+# stdout, and none of those three touch state.
+#-------------------------------------------------------------------------------
+TOKEN=""                # cached Plex token, cleared on 401
+TOKEN_SOURCE=""
+GT_PATH=""              # learned-and-sticky working gluetun route
+GT_PORT=""
+GT_ALL=""
+GT_STATUS=""
+GT_VERSION_LOGGED=0
+LAST_PUSHED=""           # last port this process successfully PUT
+LAST_PUT_AT=0            # $SECONDS at last PUT attempt
+PUT_BLOCK_UNTIL=0        # $SECONDS before which we refuse to PUT
+PUT_BACKOFF=0            # current 429 backoff, seconds
+VERIFY_FAILS=0
+PORT_INDEX_WARNED=0
+HTTP_CODE=""
+HTTP_BODY=""
+HTTP_RC=0
+TERMINATE=0
+_sleep_pid=""
+declare -A _st=()
+
+#-------------------------------------------------------------------------------
+# Logging and small predicates
+#-------------------------------------------------------------------------------
+log() { echo "${P} $*"; }
+loud() { echo "${P} **** $* ****"; }
+dbg() {
+    [[ ${LOG_LEVEL,,} == "debug" ]] && echo "${P} [debug] $*"
+    return 0
+}
+
+# state <key> <value> -> returns 0 exactly once per value change.
+# This is the whole logging strategy: transitions are loud, steady state is
+# silent. A mod that prints a line every 60s forever is a mod users mute.
+state() {
+    if [[ ${_st[$1]-__unset__} != "$2" ]]; then
+        _st[$1]="$2"
+        return 0
+    fi
+    return 1
+}
+
+# NOTE: ./finish repeats this same falsey list. Keep the two in sync.
+falsey() { [[ ${1,,} =~ ^(0|false|no|off|disable|disabled)$ ]]; }
+truthy() { [[ ! ${1,,} =~ ^(0|false|no|off|disable|disabled)$ ]]; }
+is_uint() { [[ $1 =~ ^[0-9]+$ ]]; }
+
+curl_hint() {
+    case ${1} in
+        0) echo "no error" ;;
+        6) echo "could not resolve host" ;;
+        7) echo "connection refused" ;;
+        28) echo "timed out" ;;
+        52) echo "empty reply from server" ;;
+        56) echo "connection reset" ;;
+        *) echo "curl exit ${1}" ;;
+    esac
+}
+
+normalise_url() {
+    local u=$1
+    [[ ${u} != *://* ]] && u="http://${u}"
+    while [[ ${u} == */ ]]; do u="${u%/}"; done
+    printf '%s' "${u}"
+}
+
+#-------------------------------------------------------------------------------
+# configure(): everything env-derived lives here so ./run can be sourced by the
+# unit tests without side effects.
+#-------------------------------------------------------------------------------
+configure() {
+    CONTROL_URL="$(normalise_url "${GLUETUN_PF_CONTROL_URL:-http://localhost:8000}")"
+    APIKEY="${GLUETUN_PF_APIKEY:-}"
+    GT_USER="${GLUETUN_PF_USERNAME:-}"
+    GT_PASS="${GLUETUN_PF_PASSWORD:-}"
+    PORT_INDEX="${GLUETUN_PF_PORT_INDEX:-0}"
+    PLEX_URL="$(normalise_url "${GLUETUN_PF_PLEX_URL:-http://localhost:32400}")"
+    TOKEN_OVERRIDE="${GLUETUN_PF_PLEX_TOKEN:-}"
+    PREFS_FILE="${GLUETUN_PF_PLEX_PREFS_FILE:-/config/Library/Application Support/Plex Media Server/Preferences.xml}"
+    INTERVAL="${GLUETUN_PF_INTERVAL:-60}"
+    RETRY_INTERVAL="${GLUETUN_PF_RETRY_INTERVAL:-10}"
+    MANAGE_RA="${GLUETUN_PF_MANAGE_REMOTE_ACCESS:-true}"
+    TIMEOUT="${GLUETUN_PF_TIMEOUT:-10}"
+    LOG_LEVEL="${GLUETUN_PF_LOG_LEVEL:-info}"
+
+    # Clamp rather than fail. Refusing to run because someone typed "60s"
+    # instead of "60" is the wrong call for a background mod.
+    if ! is_uint "${INTERVAL}" || ((INTERVAL < 5)); then
+        loud "GLUETUN_PF_INTERVAL='${INTERVAL}' is not a number >= 5, using 60"
+        INTERVAL=60
+    fi
+    if ! is_uint "${RETRY_INTERVAL}" || ((RETRY_INTERVAL < 2)); then
+        loud "GLUETUN_PF_RETRY_INTERVAL='${RETRY_INTERVAL}' is not a number >= 2, using 10"
+        RETRY_INTERVAL=10
+    fi
+    if ! is_uint "${TIMEOUT}" || ((TIMEOUT < 2)); then
+        TIMEOUT=10
+    fi
+    if ! is_uint "${PORT_INDEX}"; then
+        loud "GLUETUN_PF_PORT_INDEX='${PORT_INDEX}' is not a number, using 0 (lowest port)"
+        PORT_INDEX=0
+    fi
+
+    GT_AUTH=()
+    GT_AUTH_DESC="none"
+    if [[ -n ${APIKEY} ]]; then
+        GT_AUTH=(-H "X-API-Key: ${APIKEY}")
+        GT_AUTH_DESC="X-API-Key header"
+        if [[ -n ${GT_USER}${GT_PASS} ]]; then
+            log "both GLUETUN_PF_APIKEY and GLUETUN_PF_USERNAME/PASSWORD are set; using the API key"
+        fi
+    elif [[ -n ${GT_USER}${GT_PASS} ]]; then
+        GT_AUTH=(--user "${GT_USER}:${GT_PASS}")
+        GT_AUTH_DESC="HTTP basic as '${GT_USER}'"
+    fi
+
+    if [[ -z ${TOKEN_OVERRIDE} ]] &&
+        [[ ${PLEX_URL} != *localhost* && ${PLEX_URL} != *127.0.0.1* && ${PLEX_URL} != *'[::1]'* ]]; then
+        loud "GLUETUN_PF_PLEX_URL points at ${PLEX_URL} but GLUETUN_PF_PLEX_TOKEN is unset"
+        log "  -> the token will be read from THIS container's Preferences.xml, which is very likely the wrong server"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# The HTTP primitive. Sets HTTP_CODE, HTTP_BODY, HTTP_RC.
+#
+# Every flag here defends against a specific real failure:
+#   --noproxy '*'   a stray HTTP_PROXY in the Plex container's environment would
+#                   route http://localhost:8000 through it and return an
+#                   inexplicable 502. Both our targets are container-local.
+#   -g              globoff, so GLUETUN_PF_PLEX_URL=http://[::1]:32400 is not
+#                   parsed as a glob range.
+#   -s without -S   we generate our own error text from HTTP_RC, so curl's
+#                   stderr never interleaves with the body or spams the log.
+#   --*-timeout     the loop can never hang; worst case is TIMEOUT per request.
+#   -w http_code    curl emits the write-out even on connection failure, where
+#                   %{http_code} is 000. That gives a clean three-way split:
+#                   000 = no answer (consult HTTP_RC), 4xx/5xx = answered
+#                   badly, 2xx = fine.
+#
+# -L is deliberately NOT here. It is passed only for gluetun calls, because
+# `curl -L -X PUT` re-issues a PUT against the redirect target and a stray Plex
+# redirect must never become a second write.
+#-------------------------------------------------------------------------------
+http_req() {
+    local url=$1
+    shift
+    local out
+    out="$(curl -s -g --noproxy '*' \
+        --connect-timeout "${CONNECT_TIMEOUT}" --max-time "${TIMEOUT}" \
+        -w '\n%{http_code}' "$@" "${url}" 2>/dev/null)"
+    HTTP_RC=$?
+    HTTP_CODE="${out##*$'\n'}"
+    HTTP_BODY="${out%$'\n'*}"
+    [[ ${HTTP_CODE} =~ ^[0-9]{3}$ ]] || HTTP_CODE="000"
+    return 0
+}
+
+#-------------------------------------------------------------------------------
+# gluetun: parse
+#
+# The response shape changed three times across gluetun releases:
+#   <= v3.38.0        {"port":N}                       (/v1/openvpn/portforwarded)
+#   v3.39.0-v3.41.1   0 ports -> {"port":0}
+#                     1 port  -> {"port":N}
+#                     2+      -> {"ports":[N,M]}  <- no "port" key at all
+#   v3.41.2+          {"port":N,"ports":[N]}           (port == ports[0])
+#
+# So we emit the LIST and let the caller classify. Note the deliberate
+# divergence from the obvious `jq -r '(.ports // []|.[0]) // .port // 0'`: that
+# collapses "port is 0", "list is empty" and "body is not JSON" into the same
+# 0, and those three need different handling.
+#
+# Runs under process substitution, so it must not set globals.
+#-------------------------------------------------------------------------------
+extract_ports() {
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s' "$1" | jq -r '
+            if (.ports? | type) == "array" then .ports[]
+            elif (.port? | type) == "number" then .port
+            else empty end' 2>/dev/null
+        return 0
+    fi
+    # jq-less fallback. Not expected on linuxserver/plex -- /docker-mods itself
+    # parses registry manifests with jq, so if jq were missing this mod could
+    # not have been extracted into the container at all. Cheap insurance.
+    # The literal pattern "port" requires the closing quote immediately after
+    # port, which "ports" does not provide, so there is no collision.
+    local list p
+    list="$(printf '%s' "$1" | sed -n 's/.*"ports"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p')"
+    if [[ -n ${list} ]]; then
+        printf '%s\n' "${list}" | tr ',' '\n' | tr -d ' "'
+        return 0
+    fi
+    p="$(printf '%s' "$1" | sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    [[ -n ${p} ]] && printf '%s\n' "${p}"
+    return 0
+}
+
+# gluetun_select_port <json>; sets GT_PORT, GT_ALL
+#   0 = usable port found
+#   1 = valid JSON, no usable port (not ready -- a normal steady state)
+#   2 = body is not JSON we understand
+gluetun_select_port() {
+    GT_PORT=""
+    GT_ALL=""
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s' "$1" | jq -e . >/dev/null 2>&1 || return 2
+    else
+        [[ $1 == *'{'* ]] || return 2
+    fi
+
+    local -a all=() good=()
+    local p
+    mapfile -t all < <(extract_ports "$1")
+    for p in "${all[@]}"; do
+        is_uint "${p}" || continue
+        ((p > 0 && p < 65536)) || continue
+        good+=("${p}")
+    done
+    ((${#good[@]})) || return 1
+
+    # gluetun already sorts ascending; sorting ourselves removes the assumption
+    # and makes GLUETUN_PF_PORT_INDEX stable across gluetun versions.
+    mapfile -t good < <(printf '%s\n' "${good[@]}" | sort -n)
+
+    local idx=${PORT_INDEX}
+    if ((idx >= ${#good[@]})); then
+        if ((!PORT_INDEX_WARNED)); then
+            PORT_INDEX_WARNED=1
+            log "GLUETUN_PF_PORT_INDEX=${PORT_INDEX} but gluetun reports only ${#good[@]} port(s); using the lowest"
+        fi
+        idx=0
+    fi
+    GT_PORT="${good[${idx}]}"
+    GT_ALL="${good[*]}"
+    return 0
+}
+
+#-------------------------------------------------------------------------------
+# gluetun: probe. Sets GT_STATUS to one of
+# ok | notready | auth | unavailable | badresponse | unreachable
+#-------------------------------------------------------------------------------
+gluetun_probe() {
+    local -a paths
+    local path saw_auth=0 rc
+    if [[ -n ${GT_PATH} ]]; then paths=("${GT_PATH}"); else paths=("${GT_PATHS[@]}"); fi
+
+    for path in "${paths[@]}"; do
+        http_req "${CONTROL_URL}${path}" -L "${GT_AUTH[@]}"
+        case ${HTTP_CODE} in
+            200)
+                GT_PATH="${path}"
+                gluetun_select_port "${HTTP_BODY}"
+                rc=$?
+                case ${rc} in
+                    0) GT_STATUS="ok" ;;
+                    1) GT_STATUS="notready" ;;
+                    *) GT_STATUS="badresponse" ;;
+                esac
+                return 0
+                ;;
+            401)
+                # CRITICAL: gluetun v3.39.1 .. v3.40.4 answers 401 for
+                # /v1/portforward because the route does not exist there, so no
+                # role can possibly cover it. A 401 is therefore NOT proof of an
+                # auth problem until every candidate route has been tried.
+                saw_auth=1
+                ;;
+            000)
+                GT_STATUS="unreachable"
+                return 0
+                ;;
+            *) : ;; # 400/404/405/5xx -> route missing or broken, try the next
+        esac
+    done
+
+    # A previously working route stopped working: relearn from scratch.
+    GT_PATH=""
+    if ((saw_auth)); then GT_STATUS="auth"; else GT_STATUS="unavailable"; fi
+    return 0
+}
+
+# Advisory only -- nothing is gated on /v1/version, because a user whose
+# config.toml has a role covering only GET /v1/portforward gets 401 here while
+# the mod works perfectly.
+#
+# This clobbers HTTP_*, so it is called ONLY from the `ok` branch, after GT_PORT
+# has already been extracted and before sync_plex issues fresh requests. This is
+# the most likely place for a future edit to introduce a bug.
+gluetun_log_version() {
+    ((GT_VERSION_LOGGED)) && return 0
+    GT_VERSION_LOGGED=1
+    local v=""
+    http_req "${CONTROL_URL}/v1/version" -L "${GT_AUTH[@]}"
+    if [[ ${HTTP_CODE} == 200 ]] && command -v jq >/dev/null 2>&1; then
+        v="$(printf '%s' "${HTTP_BODY}" | jq -r '.version // empty' 2>/dev/null)"
+    fi
+    if [[ -n ${v} ]]; then
+        log "gluetun ${v}, using route ${GT_PATH}"
+    else
+        log "gluetun version probe returned ${HTTP_CODE} (harmless); using route ${GT_PATH}"
+    fi
+    return 0
+}
+
+print_auth_help() {
+    loud "gluetun returned 401 Unauthorized on every known port-forward route"
+    log "  -> gluetun only serves GET /v1/portforward without credentials while its auth config has NO roles."
+    log "     Mounting a config.toml with even one role removes ALL public defaults."
+    log "  -> add a role covering BOTH routes (the legacy route 301-redirects and re-enters auth):"
+    log "       [[roles]]"
+    log "       name = \"plex-portforward-mod\""
+    log "       routes = [\"GET /v1/portforward\", \"GET /v1/openvpn/portforwarded\", \"GET /v1/version\"]"
+    log "       auth = \"apikey\""
+    log "       apikey = \"<docker run --rm qmcgaw/gluetun genkey>\""
+    log "  -> mount it at /gluetun/auth/config.toml on the gluetun container, then set GLUETUN_PF_APIKEY"
+    log "     to the same value here (or GLUETUN_PF_USERNAME/GLUETUN_PF_PASSWORD for basic auth)."
+    log "  -> if your gluetun predates v3.41 this can also mean the routes genuinely do not exist; check its version."
+}
+
+print_unavailable_help() {
+    loud "gluetun's control server answered, but none of '${GT_PATHS[*]}' exist (last HTTP ${HTTP_CODE})"
+    log "  -> gluetun <= v3.38 exposes GET /v1/openvpn/portforwarded; >= v3.41 exposes GET /v1/portforward. Both are tried."
+    log "  -> check that GLUETUN_PF_CONTROL_URL really points at gluetun's control server (default port 8000)."
+}
+
+print_unreachable_help() {
+    loud "cannot reach gluetun's control server at ${CONTROL_URL} ($(curl_hint "${HTTP_RC}"))"
+    case ${HTTP_RC} in
+        7) log "  -> connection refused: is gluetun running, and is its control server listening? (HTTP_CONTROL_SERVER_ADDRESS, default :8000)" ;;
+        28)
+            # Docker's embedded DNS does not answer NXDOMAIN promptly for an
+            # unknown container name, so a wrong hostname usually surfaces here
+            # as a timeout rather than as curl's resolve error. Cover both.
+            log "  -> timed out rather than refused. Either the hostname is wrong (docker's DNS makes that look like a timeout, not a DNS error), or packets are being dropped."
+            log "     With network_mode: service:gluetun use http://localhost:8000; on a shared bridge network use http://gluetun:8000 and set FIREWALL_INPUT_PORTS=8000 on gluetun."
+            ;;
+        6) log "  -> hostname does not resolve. With network_mode: service:gluetun use http://localhost:8000; on a shared bridge network use http://gluetun:8000." ;;
+        *) : ;;
+    esac
+}
+
+#-------------------------------------------------------------------------------
+# Plex helpers
+#-------------------------------------------------------------------------------
+# Plex is "up" as soon as it answers anything at all. /identity needs no token,
+# but even a 401 proves the HTTP server is live, which is all we ask here.
+plex_up() {
+    http_req "${PLEX_URL}/identity"
+    [[ ${HTTP_CODE} != "000" ]]
+}
+
+# plex_pref <prefs-xml> <setting-id> -> prints value (or nothing).
+# Newlines are flattened first so a pretty-printed <Setting> spanning several
+# lines still yields one line per element; then splitting on '<' keeps this
+# portable between GNU and BSD sed/grep, which matters because the unit tests
+# also run it outside the container.
+# The trailing quote in id="X" stops ManualPortMappingPort from being matched by
+# a hypothetical ManualPortMappingPortRange, and requiring a space before a
+# lowercase value= stops enumValues="..." on the same element from being
+# mistaken for it.
+plex_pref() {
+    printf '%s' "$1" |
+        tr '\r\n' '  ' |
+        tr '<' '\n' |
+        grep -m1 "^Setting id=\"${2}\"" |
+        sed -n 's/.* value="\([^"]*\)".*/\1/p'
+}
+
+read_token() {
+    if [[ -n ${TOKEN_OVERRIDE} ]]; then
+        TOKEN="${TOKEN_OVERRIDE}"
+        TOKEN_SOURCE="GLUETUN_PF_PLEX_TOKEN"
+        return 0
+    fi
+    [[ -f ${PREFS_FILE} && -r ${PREFS_FILE} ]] || return 1
+    local t
+    # PMS rewrites Preferences.xml on shutdown, so a read at the wrong moment
+    # can see a truncated line. An empty extraction is treated as absent and
+    # retried, never cached.
+    t="$(sed -n 's/^.*PlexOnlineToken="\([^"]*\)".*$/\1/p' "${PREFS_FILE}" 2>/dev/null | head -n1)"
+    [[ -n ${t} ]] || return 1
+    TOKEN="${t}"
+    TOKEN_SOURCE="${PREFS_FILE}"
+    return 0
+}
+
+#-------------------------------------------------------------------------------
+# sync_plex <port> -- the only thing in this mod that writes anything.
+#
+# Read-before-write on every poll, rather than trusting LAST_PUSHED, is what
+# makes the mod self-heal after a /config restore, a Plex rollback, or a user
+# unticking the checkbox in the web UI. The cost is one localhost GET per poll.
+#
+# Four independent guards bound the write rate, because Plex rate-limits its
+# "Published Mapping State" with HTTP 429: only-on-change, MIN_PUT_GAP,
+# exponential 429 backoff, and VERIFY_FAILS.
+#-------------------------------------------------------------------------------
+sync_plex() {
+    local want=$1
+    local cur_port="" cur_mode="" cur_pub="" need=0 reason="" qs
+
+    http_req "${PLEX_URL}/:/prefs" -H "X-Plex-Token: ${TOKEN}"
+    case ${HTTP_CODE} in
+        200)
+            state prefsread ok >/dev/null
+            cur_port="$(plex_pref "${HTTP_BODY}" ManualPortMappingPort)"
+            cur_mode="$(plex_pref "${HTTP_BODY}" ManualPortMappingMode)"
+            cur_pub="$(plex_pref "${HTTP_BODY}" PublishServerOnPlexOnlineKey)"
+            # All three matter. Plex's docs are explicit that setting the port
+            # while ManualPortMappingMode is off is a silent no-op.
+            [[ ${cur_port} == "${want}" ]] || {
+                need=1
+                reason+="ManualPortMappingPort ${cur_port:-?}->${want} "
+            }
+            [[ ${cur_mode} == "1" ]] || {
+                need=1
+                reason+="ManualPortMappingMode ${cur_mode:-?}->1 "
+            }
+            if truthy "${MANAGE_RA}" && [[ ${cur_pub} != "1" ]]; then
+                need=1
+                reason+="PublishServerOnPlexOnlineKey ${cur_pub:-?}->1 "
+            fi
+            ;;
+        401)
+            loud "Plex rejected our token while reading settings (401); will re-read ${PREFS_FILE}"
+            TOKEN=""
+            state token invalid >/dev/null
+            return 1
+            ;;
+        *)
+            # Cannot read current state. PUT once per distinct port and then
+            # stop, so a broken read path cannot become an unbounded write loop.
+            if [[ ${LAST_PUSHED} == "${want}" ]]; then
+                state prefsread "blind:${HTTP_CODE}" &&
+                    log "cannot read Plex settings (HTTP ${HTTP_CODE}); port ${want} was already pushed this session, not re-sending"
+                return 1
+            fi
+            state prefsread "blind:${HTTP_CODE}" &&
+                loud "cannot read Plex settings (HTTP ${HTTP_CODE}); pushing port ${want} without comparing"
+            need=1
+            reason="current state unknown"
+            ;;
+    esac
+
+    if ((!need)); then
+        dbg "already in sync: port=${want} mode=${cur_mode} publish=${cur_pub}"
+        LAST_PUSHED="${want}"
+        VERIFY_FAILS=0
+        return 0
+    fi
+
+    if ((PUT_BLOCK_UNTIL > SECONDS)); then
+        dbg "update deferred for $((PUT_BLOCK_UNTIL - SECONDS))s (backoff)"
+        return 1
+    fi
+    if ((LAST_PUT_AT > 0 && SECONDS - LAST_PUT_AT < MIN_PUT_GAP)); then
+        dbg "update deferred, previous write was $((SECONDS - LAST_PUT_AT))s ago"
+        return 1
+    fi
+
+    # Did our own previous write silently fail to stick? Without this check a
+    # silently-ignored PUT becomes an invisible once-per-poll write forever --
+    # exactly the shape of a 429 incident.
+    # Written as an explicit add, not (( VERIFY_FAILS++ )), which evaluates to 0
+    # on the first increment and so returns exit status 1.
+    if [[ -n ${LAST_PUSHED} && ${LAST_PUSHED} == "${want}" ]]; then
+        VERIFY_FAILS=$((VERIFY_FAILS + 1))
+        if ((VERIFY_FAILS >= MAX_VERIFY_FAILS)); then
+            loud "Plex has accepted ${VERIFY_FAILS} updates for port ${want} but the setting is not sticking"
+            log "  -> something else is rewriting these settings, or this Plex build ignores PUT /:/prefs. Backing off ${BLOCK_ON_BAD_REQUEST}s."
+            PUT_BLOCK_UNTIL=$((SECONDS + BLOCK_ON_BAD_REQUEST))
+            return 1
+        fi
+    fi
+
+    log "updating Plex: ${reason}"
+    qs="ManualPortMappingMode=1&ManualPortMappingPort=${want}"
+    truthy "${MANAGE_RA}" && qs="PublishServerOnPlexOnlineKey=1&${qs}"
+    # Token goes in the header, never the query string: a URL-borne token ends
+    # up in PMS's own access logs and in any reverse proxy added later.
+    http_req "${PLEX_URL}/:/prefs?${qs}" -X PUT -H "X-Plex-Token: ${TOKEN}"
+    LAST_PUT_AT=${SECONDS}
+
+    case ${HTTP_CODE} in
+        200)
+            loud "Plex public port is now ${want}"
+            LAST_PUSHED="${want}"
+            PUT_BACKOFF=0
+            PUT_BLOCK_UNTIL=0
+            return 0
+            ;;
+        401)
+            loud "Plex rejected our token while writing settings (401); will re-read ${PREFS_FILE}"
+            TOKEN=""
+            return 1
+            ;;
+        429)
+            PUT_BACKOFF=$((PUT_BACKOFF > 0 ? PUT_BACKOFF * 2 : 60))
+            ((PUT_BACKOFF > PUT_BACKOFF_CAP)) && PUT_BACKOFF=${PUT_BACKOFF_CAP}
+            PUT_BLOCK_UNTIL=$((SECONDS + PUT_BACKOFF))
+            loud "Plex rate-limited the settings update (429); retrying in ${PUT_BACKOFF}s"
+            return 1
+            ;;
+        400)
+            loud "Plex returned 400 Bad Request for '${qs}'"
+            log "  -> a preference name was rejected (they are case-sensitive). This is a mod bug or a Plex API change. Backing off ${BLOCK_ON_BAD_REQUEST}s."
+            PUT_BLOCK_UNTIL=$((SECONDS + BLOCK_ON_BAD_REQUEST))
+            return 1
+            ;;
+        000)
+            log "Plex went away while writing settings ($(curl_hint "${HTTP_RC}"))"
+            return 1
+            ;;
+        *)
+            loud "unexpected HTTP ${HTTP_CODE} writing Plex settings: ${HTTP_BODY:0:200}"
+            PUT_BLOCK_UNTIL=$((SECONDS + 60))
+            return 1
+            ;;
+    esac
+}
+
+#-------------------------------------------------------------------------------
+# Interruptible sleep. A foreground `sleep` defers traps until it finishes,
+# which would make `docker stop` block for its whole grace period and then
+# SIGKILL us on every stack restart.
+#-------------------------------------------------------------------------------
+_on_term() {
+    TERMINATE=1
+    [[ -n ${_sleep_pid} ]] && kill "${_sleep_pid}" 2>/dev/null
+    return 0
+}
+trap _on_term TERM INT
+
+_sleep() {
+    sleep "$1" &
+    _sleep_pid=$!
+    wait "${_sleep_pid}" 2>/dev/null
+    _sleep_pid=""
+    if ((TERMINATE)); then
+        log "shutting down"
+        exit 0
+    fi
+    return 0
+}
+
+#-------------------------------------------------------------------------------
+# main
+#-------------------------------------------------------------------------------
+main() {
+    loud "starting"
+    log "gluetun control server : ${CONTROL_URL}"
+    log "gluetun auth           : ${GT_AUTH_DESC}"
+    log "plex                   : ${PLEX_URL}"
+    log "poll interval          : ${INTERVAL}s (retry ${RETRY_INTERVAL}s, request timeout ${TIMEOUT}s)"
+    if truthy "${MANAGE_RA}"; then
+        log "remote access switch   : managed (forced on)"
+    else
+        log "remote access switch   : left alone"
+    fi
+    # This mod cannot verify the redirect exists: reading gluetun's environment
+    # from another container is impossible, the NAT rule needs iptables and
+    # NET_ADMIN that Plex does not have, and hairpinning to the VPN IP from
+    # inside the tunnel fails whether or not the rule is there. So we warn.
+    log "reminder: gluetun needs VPN_PORT_FORWARDING=on AND VPN_PORT_FORWARDING_LISTENING_PORT=32400"
+    log "  (VPN_PORT_FORWARDING_LISTENING_PORTS on gluetun master) or nothing will actually reach Plex on the forwarded port"
+
+    local unreachable_streak=0
+
+    while ((!TERMINATE)); do
+        if ! plex_up; then
+            state plex down && loud "waiting for Plex to answer on ${PLEX_URL} ($(curl_hint "${HTTP_RC}"))"
+            _sleep "${RETRY_INTERVAL}"
+            continue
+        fi
+        state plex up && log "Plex is answering on ${PLEX_URL}"
+
+        if [[ -z ${TOKEN} ]]; then
+            if ! read_token; then
+                state token missing && {
+                    loud "no Plex token yet - is this server claimed?"
+                    log "  -> looking for PlexOnlineToken in ${PREFS_FILE}; it only appears once the server is claimed"
+                    log "  -> claim it in the Plex web UI (or set PLEX_CLAIM and recreate), or set GLUETUN_PF_PLEX_TOKEN"
+                    log "  -> retrying every ${RETRY_INTERVAL}s; nothing else will happen until then"
+                }
+                _sleep "${RETRY_INTERVAL}"
+                continue
+            fi
+            state token present && log "using Plex token from ${TOKEN_SOURCE} (never logged)"
+        fi
+
+        gluetun_probe
+        case ${GT_STATUS} in
+            ok)
+                unreachable_streak=0
+                state gt ok && log "gluetun control server reachable at ${CONTROL_URL}${GT_PATH}"
+                gluetun_log_version
+                if state gtport "${GT_PORT}"; then
+                    if [[ ${GT_ALL} != "${GT_PORT}" ]]; then
+                        loud "gluetun forwarded port: ${GT_PORT} (all: ${GT_ALL})"
+                    else
+                        loud "gluetun forwarded port: ${GT_PORT}"
+                    fi
+                fi
+                sync_plex "${GT_PORT}"
+                _sleep "${INTERVAL}"
+                ;;
+            notready)
+                unreachable_streak=0
+                state gt notready && {
+                    loud "gluetun reports no forwarded port yet"
+                    log "  -> leaving Plex's public port unchanged${LAST_PUSHED:+ (last value we set: ${LAST_PUSHED})}"
+                }
+                _sleep "${INTERVAL}"
+                ;;
+            auth)
+                unreachable_streak=0
+                state gt auth && print_auth_help
+                _sleep "${INTERVAL}"
+                ;;
+            badresponse)
+                unreachable_streak=0
+                state gt badresponse &&
+                    loud "gluetun answered 200 on ${GT_PATH} but the body is not JSON we understand: ${HTTP_BODY:0:200}"
+                _sleep "${INTERVAL}"
+                ;;
+            unavailable)
+                unreachable_streak=0
+                state gt unavailable && print_unavailable_help
+                _sleep "${INTERVAL}"
+                ;;
+            *)
+                # Converge fast while gluetun is merely booting, then relax so a
+                # permanently wrong URL does not retry every 10s forever.
+                unreachable_streak=$((unreachable_streak + 1))
+                state gt "unreachable:${HTTP_RC}" && print_unreachable_help
+                if ((unreachable_streak > 6)); then
+                    _sleep "${INTERVAL}"
+                else
+                    _sleep "${RETRY_INTERVAL}"
+                fi
+                ;;
+        esac
+    done
+}
+
+#-------------------------------------------------------------------------------
+# Entry point
+#-------------------------------------------------------------------------------
+# Sourced by test/run_tests.sh: define everything, run nothing.
+[[ -n ${GLUETUN_PF_LIB_ONLY:-} ]] && return 0
+
+# The `sleep 2` before each intentional exit is the anti-hot-loop measure. The
+# main loop is structurally incapable of exiting -- no set -e, no exit outside
+# these gates and the SIGTERM path -- but a future edit could introduce a bash
+# runtime error, and ./finish's duplicated falsey check could disagree with
+# ours. ./finish throttles unexpected exits; these two throttle the intended
+# ones.
+if falsey "${GLUETUN_PF_ENABLED:-true}"; then
+    echo "${P} **** GLUETUN_PF_ENABLED='${GLUETUN_PF_ENABLED}', this mod will stay inert ****"
+    sleep 2
+    exit 0
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+    echo "${P} **** curl is not present in this image, cannot continue ****"
+    sleep 2
+    exit 0
+fi
+
+configure
+main

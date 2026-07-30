@@ -1,0 +1,27 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+#
+# Longrun: a supervised process that stays up for the life of the container.
+# Delete this directory (and its user/contents.d entry) if the mod is one-shot.
+#
+# Rules that are easy to get wrong:
+#
+#  * No `set -e`. s6 restarts a longrun the moment it exits, so an unguarded
+#    error becomes a hot restart loop. Check fallible calls explicitly instead.
+#  * dependencies.d/init-services orders this after the app's service is
+#    STARTED, not after it is READY. If you need the app to be up, wait for it
+#    yourself, in a loop -- the app can also restart under you at any time.
+#  * Ship a `finish` script if you need a restart policy (exit 125 tells s6 to
+#    stop restarting). See the plex-gluetun-portforward-mod for a worked example.
+#  * Do NOT add a `notification-fd` file unless the process really writes to that
+#    fd; s6-rc will otherwise wait for a readiness signal that never arrives.
+
+echo "[mod-modname] **** starting ****"
+
+# Drop to the PUID/PGID user for anything that touches /config. The guard
+# matters: under LSIO_NON_ROOT_USER there is no `abc` and s6-setuidgid fails.
+if [[ -z ${LSIO_NON_ROOT_USER} ]]; then
+    exec s6-setuidgid abc sleep infinity
+else
+    exec sleep infinity
+fi

@@ -1,0 +1,14 @@
+# Genuine auth failure: every known route 401s. This is what gluetun master
+# does once the "public by default" role is removed, and what any gluetun does
+# when a mounted config.toml has roles that do not cover our routes.
+# Expect: print_auth_help exactly once, then quiet polling.
+:8000 {
+	log {
+		output stdout
+	}
+
+	handle {
+		header WWW-Authenticate `Basic realm="restricted", charset="UTF-8"`
+		respond "Unauthorized" 401
+	}
+}

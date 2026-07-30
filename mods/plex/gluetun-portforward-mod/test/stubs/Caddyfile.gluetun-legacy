@@ -1,0 +1,32 @@
+# THE CRITICAL REGRESSION TEST -- gluetun v3.39.1 .. v3.40.4.
+#
+# /v1/portforward does not exist in those releases, and because no auth role can
+# cover a route that is not in gluetun's route table, the auth middleware answers
+# 401 rather than 404. A naive implementation reads that as "bad credentials",
+# prints auth help and gives up. Six gluetun releases behave this way.
+#
+# Expect: the mod falls through to the legacy route, uses it, caches it, and
+# prints NO auth help at all.
+:8000 {
+	log {
+		output stdout
+	}
+
+	handle /v1/portforward {
+		respond "Unauthorized" 401
+	}
+
+	handle /v1/openvpn/portforwarded {
+		header Content-Type application/json
+		respond `{"port":54321}` 200
+	}
+
+	# Version probing is advisory, so 401 here must not break anything either.
+	handle /v1/version {
+		respond "Unauthorized" 401
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}

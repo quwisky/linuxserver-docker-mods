@@ -1,0 +1,129 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+echo "**** Setting up AMD VAAPI drivers ****"
+
+# ============================================================
+# Step 0: Fix Plex's hardcoded amdgpu.ids path(s)
+# Plex's bundled libdrm has hardcoded paths from their build env.
+# These paths change with each Plex release, so we dynamically
+# detect them by scanning the binaries.
+# ============================================================
+
+OUR_AMDGPU_IDS="/usr/share/libdrm/amdgpu.ids"
+
+if [ -f "$OUR_AMDGPU_IDS" ]; then
+    echo "Scanning for hardcoded amdgpu.ids paths..."
+    
+    # Search Plex libs for hardcoded paths using grep -a (binary-safe)
+    # The path pattern from Plex's Conan build system
+    FOUND_PATHS=$(grep -r -h -o -a '/home/runner[^"]*amdgpu\.ids' \
+                  /usr/lib/plexmediaserver/lib/ 2>/dev/null | sort -u)
+    
+    if [ -n "$FOUND_PATHS" ]; then
+        echo "$FOUND_PATHS" | while read -r ids_path; do
+            if [ -n "$ids_path" ]; then
+                echo "Found hardcoded path: $ids_path"
+                mkdir -p "$(dirname "$ids_path")"
+                ln -sf "$OUR_AMDGPU_IDS" "$ids_path"
+                echo "  -> Symlinked"
+            fi
+        done
+    else
+        echo "No hardcoded paths found (GPU may show as 'Unknown AMD' - cosmetic only)"
+    fi
+else
+    echo "WARNING: amdgpu.ids not found at $OUR_AMDGPU_IDS"
+fi
+
+# ============================================================
+# Step 1: Create wrapper for Plex Transcoder
+# This ensures our libva/Mesa stack is used instead of Plex's
+# ============================================================
+
+PLEX_TRANSCODER="/usr/lib/plexmediaserver/Plex Transcoder"
+PLEX_TRANSCODER_ORIG="/usr/lib/plexmediaserver/Plex Transcoder.orig"
+
+if [ ! -f "$PLEX_TRANSCODER_ORIG" ]; then
+    echo "Creating Plex Transcoder wrapper..."
+    
+    mv "$PLEX_TRANSCODER" "$PLEX_TRANSCODER_ORIG"
+    
+    cat > "$PLEX_TRANSCODER" << 'EOF'
+#!/bin/bash
+# AMD VAAPI wrapper - ensures modern Mesa/libva is used
+export LD_LIBRARY_PATH="/vaapi-amdgpu/lib:${LD_LIBRARY_PATH}"
+export LIBVA_DRIVERS_PATH="/vaapi-amdgpu/lib/dri"
+export LIBVA_DRIVER_NAME="radeonsi"
+
+# Fix shader cache permission issue
+export MESA_SHADER_CACHE_DIR="/config/Library/Application Support/Plex Media Server/Cache/mesa-shader-cache"
+mkdir -p "$MESA_SHADER_CACHE_DIR" 2>/dev/null
+
+exec "/usr/lib/plexmediaserver/Plex Transcoder.orig" "$@"
+EOF
+    
+    chmod +x "$PLEX_TRANSCODER"
+    echo "Transcoder wrapper created"
+else
+    echo "Transcoder wrapper already exists"
+fi
+
+# ============================================================
+# Step 2: Create wrapper for Plex Media Server
+# Hardware detection happens in main PMS process too
+# ============================================================
+
+PLEX_SERVER="/usr/lib/plexmediaserver/Plex Media Server"
+PLEX_SERVER_ORIG="/usr/lib/plexmediaserver/Plex Media Server.orig"
+
+if [ ! -f "$PLEX_SERVER_ORIG" ]; then
+    echo "Creating Plex Media Server wrapper..."
+    
+    mv "$PLEX_SERVER" "$PLEX_SERVER_ORIG"
+    
+    cat > "$PLEX_SERVER" << 'EOF'
+#!/bin/bash
+# AMD VAAPI wrapper for main Plex process
+export LD_LIBRARY_PATH="/vaapi-amdgpu/lib:${LD_LIBRARY_PATH}"
+export LIBVA_DRIVERS_PATH="/vaapi-amdgpu/lib/dri"
+export LIBVA_DRIVER_NAME="radeonsi"
+
+# Fix shader cache permission issue
+export MESA_SHADER_CACHE_DIR="/config/Library/Application Support/Plex Media Server/Cache/mesa-shader-cache"
+mkdir -p "$MESA_SHADER_CACHE_DIR" 2>/dev/null
+
+exec "/usr/lib/plexmediaserver/Plex Media Server.orig" "$@"
+EOF
+    
+    chmod +x "$PLEX_SERVER"
+    echo "Plex Media Server wrapper created"
+else
+    echo "Plex Media Server wrapper already exists"
+fi
+
+# ============================================================
+# Step 3: Set up symlinks in Plex's VA driver cache
+# ============================================================
+
+PLEX_VA_CACHE="/config/Library/Application Support/Plex Media Server/Cache/va-dri-linux-x86_64"
+mkdir -p "$PLEX_VA_CACHE"
+
+rm -f "$PLEX_VA_CACHE"/*.so* 2>/dev/null
+
+for driver in /vaapi-amdgpu/lib/dri/*.so; do
+    if [ -f "$driver" ]; then
+        ln -sf "$driver" "$PLEX_VA_CACHE/$(basename "$driver")"
+        echo "Linked driver: $(basename "$driver")"
+    fi
+done
+
+# ============================================================
+# Step 4: Verify setup
+# ============================================================
+
+if [ -f "$OUR_AMDGPU_IDS" ]; then
+    echo "amdgpu.ids present at $OUR_AMDGPU_IDS"
+fi
+
+echo "**** AMD VAAPI setup complete ****"

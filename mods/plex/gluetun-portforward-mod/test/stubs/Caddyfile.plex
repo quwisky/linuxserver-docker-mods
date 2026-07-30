@@ -1,0 +1,42 @@
+# Plex stub, happy path.
+#
+# Every request is logged to stdout, which is the point: `docker compose logs
+# plex-stub` shows the exact query string the mod sent, so you can assert
+# ManualPortMappingMode=1, the port, and the case-sensitive spelling of every
+# preference name.
+#
+# GET /:/prefs deliberately reports a STALE port and mode=0, so the mod has
+# something to converge. It never actually changes, which after
+# MAX_VERIFY_FAILS polls should trip the "setting is not sticking" diagnostic --
+# that is intended, and is itself a test of that guard.
+:32400 {
+	log {
+		output stdout
+	}
+
+	handle /identity {
+		header Content-Type application/xml
+		respond `<MediaContainer size="0" machineIdentifier="stub-machine-id" version="1.41.0.0"/>` 200
+	}
+
+	@getprefs {
+		method GET
+		path /:/prefs
+	}
+	handle @getprefs {
+		header Content-Type application/xml
+		respond `<MediaContainer size="3"><Setting id="ManualPortMappingMode" label="Manually specify public port" type="bool" default="false" value="0" hidden="false" advanced="true" group="network" /><Setting id="ManualPortMappingPort" label="External port" type="int" default="32400" value="32400" hidden="false" advanced="true" group="network" /><Setting id="PublishServerOnPlexOnlineKey" label="Enable Remote Access" type="bool" default="false" value="0" group="network" /></MediaContainer>` 200
+	}
+
+	@putprefs {
+		method PUT
+		path /:/prefs
+	}
+	handle @putprefs {
+		respond "" 200
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}

@@ -1,0 +1,34 @@
+# Plex rejects a preference name (what a casing mistake or an API change looks
+# like). Expect one "400 Bad Request" line naming the query string, a "this is a
+# mod bug or a Plex API change" hint, and a 300s block -- NOT a dead service.
+:32400 {
+	log {
+		output stdout
+	}
+
+	handle /identity {
+		header Content-Type application/xml
+		respond `<MediaContainer size="0" machineIdentifier="stub-machine-id"/>` 200
+	}
+
+	@getprefs {
+		method GET
+		path /:/prefs
+	}
+	handle @getprefs {
+		header Content-Type application/xml
+		respond `<MediaContainer size="3"><Setting id="ManualPortMappingMode" type="bool" value="0" /><Setting id="ManualPortMappingPort" type="int" value="32400" /><Setting id="PublishServerOnPlexOnlineKey" type="bool" value="0" /></MediaContainer>` 200
+	}
+
+	@putprefs {
+		method PUT
+		path /:/prefs
+	}
+	handle @putprefs {
+		respond "Bad Request" 400
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}

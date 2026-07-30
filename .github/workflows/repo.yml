@@ -1,0 +1,70 @@
+name: Repo
+
+# Repo-wide checks. Deliberately has NO paths filter: it must run on every push,
+# because its most important job is catching a mod that has no CI workflow of
+# its own -- a mod whose per-mod workflow is missing would otherwise never be
+# tested or built, and nothing would say so.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: mods/ has the two-level app/mod shape
+        run: ci/check-mod-layout.sh
+
+      - name: every mod has a CI workflow, and every workflow has a mod
+        run: ci/check-mod-workflows.sh
+
+      - name: shellcheck the shared tooling and the template
+        # Per-mod scripts are checked by that mod's own workflow; these belong to
+        # no mod, so nothing else would ever look at them.
+        run: |
+          mapfile -t files < <(find ci template -type f \
+            \( -name run -o -name finish -o -name check -o -name '*.sh' \) 2>/dev/null | sort)
+          if ((${#files[@]} == 0)); then echo "nothing to check"; exit 0; fi
+          printf '  %s\n' "${files[@]}"
+          shellcheck "${files[@]}"
+
+      - name: the template must still scaffold a valid mod
+        # The template is not built by anything, so it rots silently. Scaffold
+        # from it into scratch directories -- never into mods/, which would race
+        # the workflow-coverage check above -- and apply the same structural
+        # rules a real mod has to pass.
+        run: |
+          scratch="$(mktemp -d)"
+          export MODS_DIR="${scratch}/mods" WF_DIR="${scratch}/wf"
+          ci/new-mod.sh imgname checkme
+          d="${MODS_DIR}/imgname/checkme"
+          rc=0
+          # Point the real checkers at the scaffold. Without this the generated
+          # `paths:` filter is never verified anywhere, and a broken one would
+          # leave CI green while every new mod silently never builds.
+          ci/check-mod-layout.sh || rc=1
+          ci/check-mod-workflows.sh || rc=1
+          if grep -rn 'imagename\|modname' "${d}"; then
+            echo "::error::template placeholders survived scaffolding"; rc=1
+          fi
+          for svc in "${d}"/root/etc/s6-overlay/s6-rc.d/*/; do
+            s="$(basename "${svc%/}")"
+            case "${s}" in user | user2 | init-mods* | legacy-services) continue ;; esac
+            [[ -f "${svc}type" ]] || { echo "::error::scaffold: ${s} has no type"; rc=1; }
+            ls "${d}"/root/etc/s6-overlay/s6-rc.d/user*/contents.d/"${s}" >/dev/null 2>&1 ||
+              { echo "::error::scaffold: ${s} not registered in user/contents.d"; rc=1; }
+          done
+          bad=$(find "${d}" \( -name run -o -name finish -o -name check \) -not -perm -u=x,g=x,o=x -print)
+          [[ -z ${bad} ]] || { echo "::error::scaffold produced non-executable scripts:"; echo "${bad}"; rc=1; }
+          docker build -q -t local/scaffold-check "${d}" >/dev/null
+          layers=$(docker image inspect local/scaffold-check --format '{{len .RootFS.Layers}}')
+          [[ ${layers} == 1 ]] || { echo "::error::scaffold built ${layers} layers, expected 1"; rc=1; }
+          rm -rf "${scratch}"
+          exit $rc

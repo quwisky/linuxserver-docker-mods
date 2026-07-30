@@ -1,0 +1,31 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+#
+# Oneshot, run once at container start.
+#
+# It depends on init-mods, which sits downstream of the whole app config chain,
+# so by the time this runs /config exists and has been chowned.
+#
+# init-mods-end depends on THIS script (see
+# root/etc/s6-overlay/s6-rc.d/init-mods-end/dependencies.d/), which is what makes
+# the app wait for it. Depending on init-mods alone only orders you after it --
+# nothing waits for you.
+#
+# Delete this whole directory if the mod does not need to do anything before the
+# app starts. A oneshot that fails can block container startup, so do not add one
+# "just for a banner".
+
+echo "[mod-modname] **** hello from the oneshot ****"
+
+# If you need extra packages, do NOT call apt-get/apk directly: append to the
+# batched install list and let the framework install them, then do the work that
+# depends on them in a SECOND oneshot that depends on init-mods-package-install.
+#
+# if ! command -v somebinary >/dev/null 2>&1; then
+#     echo "[mod-modname] **** adding deps to the package install list ****"
+#     [[ -f /usr/bin/apt ]] && echo "somepackage" >>/mod-repo-packages-to-install.list   # Ubuntu/Debian
+#     [[ -f /sbin/apk ]] && echo "somepackage" >>/mod-repo-packages-to-install.list      # Alpine
+# fi
+
+# Use lsiown, never chown, for anything under /config.
+# lsiown -R abc:abc /config/something
