@@ -17,6 +17,17 @@ numbered. See [Release channels](README.md#release-channels).
 
 ## [Unreleased]
 
+### Changed
+
+- All GitHub Actions bumped to majors that declare Node 24, since the runners
+  now warn that Node 20 is deprecated: `checkout` v4→v7, `setup-python` v5→v7,
+  `upload-pages-artifact` v3→v5, `deploy-pages` v4→v5, the three `docker/setup-*`
+  and `login` actions v3→v4, and `build-push-action` v6→v7. Every input this
+  repo actually passes was checked against the new majors first.
+- Added a Dependabot config for `github-actions`, grouped into one monthly PR. A
+  pinned major keeps working long after the Node runtime it declares is
+  deprecated, and the only signal is a warning buried in a run log.
+
 ### Fixed
 
 - Single-platform mods published a manifest `/docker-mods` cannot read, so they

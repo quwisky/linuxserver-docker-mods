@@ -1,0 +1,20 @@
+version: 2
+
+# Actions go stale quietly: a pinned major keeps working for a long time while
+# the Node runtime it declares is deprecated underneath it, and the only signal
+# is a warning buried in the run log. Let Dependabot raise that as a PR instead.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      # Matches the Conventional Commits used everywhere else here.
+      prefix: ci
+    groups:
+      # One PR for the lot rather than eight. These move together in practice,
+      # and every mod's CI runs against the change anyway.
+      actions:
+        patterns:
+          - '*'
