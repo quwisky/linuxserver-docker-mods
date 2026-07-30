@@ -10,10 +10,14 @@ name: Mod CI
 #
 # A mod lives at mods/<app>/<mod>, and is published as its own GHCR package
 # named <app>-<mod>, with ordinary tags:
-#   release  (master)     ghcr.io/<owner>/<app>-<mod>:latest
+#   release  (master)   ghcr.io/<owner>/<app>-<mod>:latest
 #                       ghcr.io/<owner>/<app>-<mod>:<commit-sha>
 #   nightly  (develop)  ghcr.io/<owner>/<app>-<mod>:nightly
 #                       ghcr.io/<owner>/<app>-<mod>:nightly-<tree-sha>
+#   custom   (manual)   ghcr.io/<owner>/<app>-<mod>:<tag>
+#
+# A custom tag is published on its own: it never also moves :latest or :nightly,
+# so a manual build of a feature branch cannot displace a channel.
 #
 # app and mod are separate inputs rather than one composite id because the id
 # cannot be split back apart: LinuxServer image names contain dashes of their
@@ -59,6 +63,14 @@ on:
         required: false
         default: 'linux/amd64,linux/arm64'
         type: string
+      tag:
+        description: >-
+          Publish under this exact tag instead of the channel tags. For manual
+          runs: it lets any branch be published for testing without touching
+          :latest or :nightly. Blank means the normal channel tags.
+        required: false
+        default: ''
+        type: string
       dedupe:
         description: >-
           Skip the nightly publish when the mod directory is unchanged. Set false
@@ -86,6 +98,7 @@ jobs:
           WANT: ${{ inputs.ref }}
           FALLBACK: ${{ github.ref }}
           CHANNEL: ${{ inputs.channel }}
+          TAG: ${{ inputs.tag }}
         run: |
           ref="${WANT:-${FALLBACK}}"
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
@@ -96,6 +109,23 @@ jobs:
             release | nightly) ;;
             *) echo "::error::unknown channel '${CHANNEL}'; expected release or nightly"; exit 1 ;;
           esac
+
+          # Validate here rather than at push time, so a typo fails in seconds
+          # instead of after the whole test job has run.
+          if [[ -n ${TAG} ]]; then
+            if [[ ! ${TAG} =~ ^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$ ]]; then
+              echo "::error::'${TAG}' is not a valid OCI tag. Allowed: alphanumerics, dot, dash, underscore; must not start with a dot or dash; 128 characters max."
+              exit 1
+            fi
+            case "${TAG}" in
+              latest | nightly)
+                echo "::error::refusing to publish '${TAG}' as a custom tag: it is a channel tag, and hand-publishing one from an arbitrary ref is how :latest gets silently replaced."
+                echo "::error::to publish a channel, dispatch from master (:latest) or develop (:nightly) and leave the tag field blank."
+                exit 1
+                ;;
+            esac
+            echo "custom tag: ${TAG}"
+          fi
 
           # Only a ref the caller asked for *instead of* the triggering one can
           # be absent -- the triggering ref obviously exists, and checking it
@@ -277,14 +307,20 @@ jobs:
       ID: ${{ inputs.app }}-${{ inputs.mod }}
       CHANNEL: ${{ inputs.channel }}
       DEDUPE: ${{ inputs.dedupe }}
+      TAG: ${{ inputs.tag }}
     steps:
       # First step rather than buried, since the job name cannot carry it.
       - name: what is being published
         run: |
-          echo "mod:     ${ID}"
-          echo "channel: ${CHANNEL}"
-          echo "ref:     ${REF}"
-          echo "::notice title=Publishing ${ID}::channel ${CHANNEL} from ${REF}"
+          echo "mod: ${ID}"
+          echo "ref: ${REF}"
+          if [[ -n ${TAG} ]]; then
+            echo "tag: ${TAG}  (custom -- channel tags are left alone)"
+            echo "::notice title=Publishing ${ID}::custom tag '${TAG}' from ${REF}"
+          else
+            echo "channel: ${CHANNEL}"
+            echo "::notice title=Publishing ${ID}::channel ${CHANNEL} from ${REF}"
+          fi
         env:
           REF: ${{ needs.resolve.outputs.ref }}
 
@@ -315,29 +351,51 @@ jobs:
           # by ci/new-mod.sh and OWNER was lowercased above.
           pkg="ghcr.io/${OWNER}/${ID}"
 
-          # With dedupe off, the same git content can legitimately produce a
-          # different image (a rebuild pulls a newer base), so a pin derived
-          # only from git would be overwritten and stop being a pin. Date-stamp
-          # it so each rebuild gets its own immutable tag.
-          stamp=""
-          [[ ${DEDUPE} != "true" ]] && stamp="-$(date -u +%Y%m%d)"
-
-          if [[ ${CHANNEL} == nightly ]]; then
-            # Content-addressed: the git tree hash of just this mod's directory.
-            # Identical content always yields the same pin, which is what makes
-            # the skip below possible.
-            tree="$(git rev-parse --short=12 "HEAD:${DIR}")"
-            moving="${pkg}:nightly"
-            pinned="${pkg}:nightly-${tree}${stamp}"
-            echo "mod tree hash: ${tree}"
+          if [[ -n ${TAG} ]]; then
+            # A custom tag publishes that tag and nothing else. It must not also
+            # move :latest or :nightly -- the point is to get an image out of an
+            # arbitrary branch without disturbing a channel.
+            moving="${pkg}:${TAG}"
+            pinned=""
           else
-            moving="${pkg}:latest"
-            pinned="${pkg}:${GITHUB_SHA}${stamp}"
+            # With dedupe off, the same git content can legitimately produce a
+            # different image (a rebuild pulls a newer base), so a pin derived
+            # only from git would be overwritten and stop being a pin.
+            # Date-stamp it so each rebuild gets its own immutable tag.
+            stamp=""
+            if [[ ${DEDUPE} != "true" ]]; then stamp="-$(date -u +%Y%m%d)"; fi
+
+            if [[ ${CHANNEL} == nightly ]]; then
+              # Content-addressed: the git tree hash of just this mod's
+              # directory. Identical content always yields the same pin, which
+              # is what makes the skip below possible.
+              tree="$(git rev-parse --short=12 "HEAD:${DIR}")"
+              moving="${pkg}:nightly"
+              pinned="${pkg}:nightly-${tree}${stamp}"
+              echo "mod tree hash: ${tree}"
+            else
+              moving="${pkg}:latest"
+              pinned="${pkg}:${GITHUB_SHA}${stamp}"
+            fi
           fi
-          echo "moving=${moving}" >> "$GITHUB_OUTPUT"
-          echo "pinned=${pinned}" >> "$GITHUB_OUTPUT"
+
+          # build-push-action takes a newline-separated list, so an absent pin is
+          # simply one line rather than a blank tag it would choke on.
+          #
+          # `if` rather than `[[ ]] && echo` throughout: GitHub runs steps with
+          # `bash -e`, and that idiom as the final line of a run block exits 1
+          # when the test is false, failing the step.
+          {
+            echo "tags<<__TAGS__"
+            echo "${moving}"
+            if [[ -n ${pinned} ]]; then echo "${pinned}"; fi
+            echo "__TAGS__"
+            echo "moving=${moving}"
+            echo "pinned=${pinned}"
+          } >> "$GITHUB_OUTPUT"
+
           echo "  ${moving}"
-          echo "  ${pinned}"
+          if [[ -n ${pinned} ]]; then echo "  ${pinned}"; fi
 
       # Only for nightlies: the pin is content-addressed, so an existing pinned
       # tag means nothing changed since the last one. The moving :<mod>-nightly
@@ -347,7 +405,7 @@ jobs:
         env:
           PINNED: ${{ steps.tags.outputs.pinned }}
         run: |
-          if [[ ${CHANNEL} == nightly && ${DEDUPE} == "true" ]] && docker buildx imagetools inspect "${PINNED}" >/dev/null 2>&1; then
+          if [[ -z ${TAG} && ${CHANNEL} == nightly && ${DEDUPE} == "true" ]] && docker buildx imagetools inspect "${PINNED}" >/dev/null 2>&1; then
             echo "::notice title=${ID} unchanged::Already published as ${PINNED}; skipping the push."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -371,9 +429,7 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=${{ env.ID }}
-          tags: |
-            ${{ steps.tags.outputs.moving }}
-            ${{ steps.tags.outputs.pinned }}
+          tags: ${{ steps.tags.outputs.tags }}
 
       - name: summary
         env:

@@ -420,6 +420,16 @@ self-healing.
    manifest. This is the single most common "my mod doesn't load" cause.
 5. Point `DOCKER_MODS` at `ghcr.io/<your-user>/plex-gluetun-portforward-mod:latest`.
 
+Published tags:
+
+| Tag | From | Notes |
+| --- | --- | --- |
+| `:latest` | `master` | What you want. |
+| `:<commit-sha>` | `master` | Immutable pin of the above. |
+| `:nightly` | `develop` | Changes before they reach `:latest`. |
+| `:nightly-<tree-sha>` | `develop` | Immutable nightly pin. |
+| `:<your-tag>` | any branch | A manual run with the **tag** field filled in. Publishes that tag alone, leaving `:latest` and `:nightly` untouched. |
+
 Note that a plain `docker compose restart plex` reuses the cached mod and skips
 re-applying it when the layer digest is unchanged. Use
 `docker compose up -d --force-recreate plex` to pick up a new build.

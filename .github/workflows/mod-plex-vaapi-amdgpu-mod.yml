@@ -38,6 +38,11 @@ on:
     - cron: '30 5 * * *' # nightly from develop
     - cron: '0 3 1 * *' # monthly from master, for fresh Mesa
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Publish under this exact tag (e.g. rc1). Blank = the normal channel tags for the branch you run this from.'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -49,12 +54,15 @@ jobs:
     with:
       app: plex
       mod: vaapi-amdgpu-mod
+      # Manual runs only: everything else leaves this blank and gets the
+      # channel tags. A tag here publishes that tag alone.
+      tag: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
       # The monthly cron refreshes master; the nightly cron builds develop;
       # anything else builds whatever ref triggered it.
       ref: >-
         ${{ github.event_name != 'schedule' && github.ref
             || (github.event.schedule == '0 3 1 * *' && 'refs/heads/master' || 'refs/heads/develop') }}
-      # develop publishes :nightly, main publishes :latest.
+      # develop publishes :nightly, master publishes :latest.
       channel: >-
         ${{ ((github.event_name == 'schedule' && github.event.schedule != '0 3 1 * *')
              || github.ref == 'refs/heads/develop') && 'nightly' || 'release' }}
@@ -64,7 +72,9 @@ jobs:
         ${{ github.event_name == 'schedule'
             || (github.event_name == 'push' && github.ref == 'refs/heads/master')
             || (github.event_name == 'workflow_dispatch'
-                && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop')) }}
+                && (inputs.tag != ''
+                    || github.ref == 'refs/heads/master'
+                    || github.ref == 'refs/heads/develop')) }}
       # The drivers are x86_64: the Dockerfile pins --platform=linux/amd64 and
       # the mod links them into Plex's va-dri-linux-x86_64 cache. An arm64 build
       # would be meaningless, not merely redundant.

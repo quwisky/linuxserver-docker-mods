@@ -41,6 +41,7 @@ ordinary tags:
 | `ghcr.io/<owner>/<app>-<mod>:<commit-sha>` | `master` | immutable pin of the above |
 | `ghcr.io/<owner>/<app>-<mod>:nightly` | `develop` | nightly, if the mod changed |
 | `ghcr.io/<owner>/<app>-<mod>:nightly-<tree-sha>` | `develop` | immutable pin of the above |
+| `ghcr.io/<owner>/<app>-<mod>:<your-tag>` | any branch | manual run with a custom tag |
 
 `:latest` is what you want. Nightlies exist to try changes before they reach
 `master`:
@@ -53,6 +54,27 @@ Note that a container only re-applies a mod when it is **recreated**, not
 restarted — `/docker-mods` caches the layer and skips it when the digest is
 unchanged. `docker compose up -d --force-recreate <service>` picks up a new
 nightly.
+
+### Publishing a one-off tag
+
+Run a mod's workflow from the Actions tab, pick any branch, and fill in the
+**tag** field — `rc1`, `testing`, `v2-trial`. That builds the branch you chose
+and publishes it as `ghcr.io/<owner>/<app>-<mod>:<your-tag>`, which you can then
+point a real container at:
+
+```yaml
+  - DOCKER_MODS=ghcr.io/quwisky/plex-vaapi-amdgpu-mod:rc1
+```
+
+A custom tag publishes **only** that tag — it never also moves `:latest` or
+`:nightly`, so trying something out on a branch cannot displace what everyone
+else is pulling. It also skips the nightly's unchanged-content dedupe, since you
+asked for this build explicitly.
+
+`latest` and `nightly` are refused as custom tags. Publishing a channel is what
+running the workflow from `master` or `develop` with the field left blank
+already does, and accepting them here would mean a typo in a text box could
+replace `:latest` with a build from an arbitrary branch.
 
 ## Layout
 

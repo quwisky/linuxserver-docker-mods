@@ -277,6 +277,7 @@ Published tags:
 | `:<commit-sha>-<YYYYMMDD>` | `master` | Immutable. Pin this to hold a known-good Mesa snapshot. |
 | `:nightly` | `develop` | Changes before they reach `:latest`. |
 | `:nightly-<tree-sha>-<YYYYMMDD>` | `develop` | Immutable nightly pin. |
+| `:<your-tag>` | any branch | A manual run with the **tag** field filled in. Publishes that tag alone, leaving `:latest` and `:nightly` untouched. |
 
 Tags in the older `mesa-edge-YYYY-MM-DD` format were published while this mod
 lived in its own repository. They still resolve, but new builds do not use that

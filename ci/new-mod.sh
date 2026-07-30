@@ -144,6 +144,11 @@ on:
   schedule:
     - cron: '${CRON_MIN} ${CRON_HR} * * *'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Publish under this exact tag (e.g. rc1). Blank = the normal channel tags for the branch you run this from.'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -155,19 +160,25 @@ jobs:
     with:
       app: ${APP}
       mod: ${NAME}
+      # Manual runs only: everything else leaves this blank and gets the
+      # channel tags. A tag here publishes that tag alone.
+      tag: \${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
       # The nightly always builds develop; everything else builds whatever ref
       # triggered it.
       ref: \${{ github.event_name == 'schedule' && 'refs/heads/develop' || github.ref }}
-      # develop publishes :nightly, main publishes :latest.
+      # develop publishes :nightly, master publishes :latest.
       channel: \${{ (github.event_name == 'schedule' || github.ref == 'refs/heads/develop') && 'nightly' || 'release' }}
-      # Publish on the nightly schedule, on a push to master, and on a manual run
-      # from either main or develop. Pushes to develop and to feature branches,
-      # and all pull requests, test only.
+      # Publish on the nightly schedule, on a push to master, and on a manual
+      # run -- from master or develop for the channel tags, or from any branch
+      # at all when a custom tag is given. Pushes to develop and to feature
+      # branches, and all pull requests, test only.
       publish: >-
         \${{ github.event_name == 'schedule'
             || (github.event_name == 'push' && github.ref == 'refs/heads/master')
             || (github.event_name == 'workflow_dispatch'
-                && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop')) }}
+                && (inputs.tag != ''
+                    || github.ref == 'refs/heads/master'
+                    || github.ref == 'refs/heads/develop')) }}
 EOF
 
 echo "created ${DIR}"
