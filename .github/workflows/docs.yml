@@ -1,0 +1,87 @@
+name: Docs
+
+# Builds the MkDocs Material site and deploys it to GitHub Pages.
+#
+# docs/ is not in the repo: ci/build-docs.sh generates it from the READMEs, which
+# stay the single source of truth. So this triggers on the READMEs themselves,
+# and on the tooling that turns them into a site.
+#
+# BEFORE THE FIRST RUN: set Settings -> Pages -> Source to "GitHub Actions".
+# Without that, deploy-pages fails with a "Pages site not found"-style error that
+# reads like a workflow bug rather than a one-time setting.
+#
+# Deploys from master, matching :latest -- the site should describe what is
+# released, not what is in flight. Until master is pushed, use the manual run.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'README.md'
+      - 'mods/**/README.md'
+      - 'mkdocs.yml'
+      - 'ci/build-docs.sh'
+      - 'ci/docs-requirements.txt'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'README.md'
+      - 'mods/**/README.md'
+      - 'mkdocs.yml'
+      - 'ci/build-docs.sh'
+      - 'ci/docs-requirements.txt'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time. Cancelling an in-progress *deploy* would leave Pages
+# half-updated, so only queued runs are dropped.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: ci/docs-requirements.txt
+
+      - name: install mkdocs-material
+        run: pip install -r ci/docs-requirements.txt
+
+      - name: generate docs/ from the READMEs
+        run: ci/build-docs.sh
+
+      - name: build the site
+        # --strict turns warnings into errors, which is what catches a link that
+        # the generator failed to rewrite. Without it a broken link ships.
+        run: mkdocs build --strict
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: deploy
+    # PRs build but must not deploy; only master publishes, plus a manual run.
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -8,6 +8,9 @@ are extracted into a running LinuxServer container at start-up by `/docker-mods`
 before s6 compiles its service database. That is why dropping files into
 `/etc/s6-overlay/s6-rc.d/` from a mod works at all.
 
+📖 **[Documentation site](https://quwisky.github.io/linuxserver-docker-mods/)** —
+the same content as these READMEs, rendered and searchable.
+
 ## Available mods
 
 | Mod | For | What it does |
@@ -223,6 +226,35 @@ caller so this normally takes care of itself.
 `repo.yml` additionally scaffolds a throwaway mod from `template/` into a temp
 directory and applies the same structural rules a real mod must pass — the
 template is not built by anything, so it would otherwise rot unnoticed.
+
+## Documentation
+
+The site at
+[quwisky.github.io/linuxserver-docker-mods](https://quwisky.github.io/linuxserver-docker-mods/)
+is built with MkDocs Material and deployed to GitHub Pages from `master`.
+
+There is no `docs/` directory in the repo. `ci/build-docs.sh` generates one from
+the READMEs — this file becomes the home page, and each `mods/<app>/<mod>/README.md`
+becomes a page — then rewrites the links that only make sense in a checkout so
+they resolve on the site. Keeping a hand-written second copy of the same content
+would drift, and the READMEs are what GitHub and the GHCR package pages render
+anyway.
+
+Build it locally:
+
+```bash
+pip install -r ci/docs-requirements.txt
+ci/build-docs.sh
+mkdocs serve            # http://127.0.0.1:8000
+```
+
+`mkdocs build --strict` is what CI runs; `--strict` promotes warnings to errors,
+which is what catches a link the generator failed to rewrite. Adding a mod needs
+no docs change — the page and its nav entry appear from the directory tree.
+
+**Before the first deploy**, set **Settings → Pages → Source** to **GitHub
+Actions**. Until that is done the deploy step fails in a way that reads like a
+workflow bug rather than a one-time setting.
 
 ## Testing
 
