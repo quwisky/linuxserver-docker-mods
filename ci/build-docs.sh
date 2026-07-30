@@ -31,6 +31,11 @@ mkdir -p "${OUT}"
 # --- root README -> the site's home page ---------------------------------
 cp README.md "${OUT}/index.md"
 
+# --- changelog, if there is one ------------------------------------------
+if [[ -f CHANGELOG.md ]]; then
+    cp CHANGELOG.md "${OUT}/changelog.md"
+fi
+
 # --- one page per mod, mirroring the mods/<app>/<mod> shape --------------
 count=0
 for d in "${MODS_DIR}"/*/*/; do
@@ -65,7 +70,17 @@ sed -i.bak -E 's#\]\((\.\./)*(\.github/[^)]+)\)#]('"${BLOB}"'/\2)#g' \
 sed -i.bak -E 's#\]\((\.\./)*((ci|template)/[^)]*)\)#]('"${BLOB}"'/\2)#g' \
     "${OUT}/index.md" "${OUT}"/mods/*/*.md
 
+# Links to CHANGELOG.md resolve to the lower-cased page name on the site.
+sed -i.bak -E 's@\]\(CHANGELOG\.md(#[^)]*)?\)@](changelog.md\1)@g' "${OUT}/index.md"
+sed -i.bak -E 's@\]\((\.\./)*CHANGELOG\.md(#[^)]*)?\)@](../../changelog.md\2)@g' "${OUT}"/mods/*/*.md
+
+# CHANGELOG.md links to README.md by name, which is index.md on the site.
+if [[ -f "${OUT}/changelog.md" ]]; then
+    # `@` as the delimiter: the pattern itself contains `#`, for the anchor.
+    sed -i.bak -E 's@\]\(README\.md(#[^)]*)?\)@](index.md\1)@g' "${OUT}/changelog.md"
+fi
+
 find "${OUT}" -name '*.bak' -delete
 
-echo "**** ${OUT}/ built: 1 index + ${count} mod page(s) ****"
+echo "**** ${OUT}/ built: ${count} mod page(s) ****"
 find "${OUT}" -name '*.md' | sort | sed 's/^/  /'

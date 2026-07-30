@@ -9,7 +9,8 @@ before s6 compiles its service database. That is why dropping files into
 `/etc/s6-overlay/s6-rc.d/` from a mod works at all.
 
 📖 **[Documentation site](https://quwisky.github.io/linuxserver-docker-mods/)** —
-the same content as these READMEs, rendered and searchable.
+the same content as these READMEs, rendered and searchable. ·
+**[Changelog](CHANGELOG.md)**
 
 ## Available mods
 
@@ -239,6 +240,11 @@ becomes a page — then rewrites the links that only make sense in a checkout so
 they resolve on the site. Keeping a hand-written second copy of the same content
 would drift, and the READMEs are what GitHub and the GHCR package pages render
 anyway.
+
+[`CHANGELOG.md`](CHANGELOG.md) is published alongside them. It is written by
+hand: history here gets squashed, so a generator reading commit messages would
+have almost nothing to work with, and the useful unit of change is what a new
+image means for someone pulling it.
 
 Build it locally:
 
