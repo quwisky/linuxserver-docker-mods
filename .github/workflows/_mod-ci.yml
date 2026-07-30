@@ -417,10 +417,23 @@ jobs:
         with:
           context: ${{ env.DIR }}
           platforms: ${{ inputs.platforms }}
-          push: true
           # provenance would add an attestation manifest; a mod must stay a
           # single layer because /docker-mods only reads .layers[0].
           provenance: false
+          # THE MEDIA TYPE IS LOAD-BEARING. /docker-mods fetches the manifest
+          # with exactly two Accept types:
+          #     application/vnd.docker.distribution.manifest.v2+json
+          #     application/vnd.oci.image.index.v1+json
+          # A multi-platform build produces an OCI *index*, which is accepted.
+          # A single-platform build produces a bare OCI *image manifest*, which
+          # is not -- the registry then answers
+          #     404 MANIFEST_UNKNOWN: OCI manifest found, but Accept header
+          #     does not support OCI manifests
+          # and the mod silently falls back to its cache, so on a fresh
+          # container it does not load at all. Single-platform builds therefore
+          # publish Docker media types instead, which that first Accept covers.
+          # Verified against a live registry; see the check below.
+          outputs: type=image,push=true,oci-mediatypes=${{ contains(inputs.platforms, ',') }}
           # image.source is what links a GHCR package back to this repo, so the
           # package page shows the README and inherits repo access. Labels are
           # config metadata, not a layer, so this does not affect the
@@ -430,6 +443,54 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.title=${{ env.ID }}
           tags: ${{ steps.tags.outputs.tags }}
+
+      - name: the published manifest must be readable by /docker-mods
+        # Replays the exact request /docker-mods makes, including its two Accept
+        # headers. Anything other than a 200 with a resolvable layer digest
+        # means the mod will not load, however healthy the build looked.
+        if: steps.dedupe.outputs.skip != 'true'
+        env:
+          MOVING: ${{ steps.tags.outputs.moving }}
+          OWNER: ${{ steps.owner.outputs.name }}
+          GH_USER: ${{ github.actor }}
+          GH_PASS: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ref="${MOVING#ghcr.io/}"
+          repo="${ref%%:*}"
+          tag="${ref##*:}"
+          token="$(curl -sSf -u "${GH_USER}:${GH_PASS}" \
+            "https://ghcr.io/token?scope=repository:${repo}:pull&service=ghcr.io" | jq -r .token)"
+
+          body="$(curl -sS -w '\n%{http_code}' \
+            --header "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+            --header "Accept: application/vnd.oci.image.index.v1+json" \
+            --header "Authorization: Bearer ${token}" \
+            "https://ghcr.io/v2/${repo}/manifests/${tag}")"
+          code="${body##*$'\n'}"
+          json="${body%$'\n'*}"
+
+          if [[ ${code} != 200 ]]; then
+            echo "::error title=Mod is unreadable::${MOVING} returned HTTP ${code} for the Accept types /docker-mods sends."
+            echo "${json}"
+            echo "This usually means a bare OCI image manifest was published. See the outputs: line above."
+            exit 1
+          fi
+
+          # /docker-mods takes .layers[0] directly, or resolves the index first.
+          if jq -e '.layers // empty' >/dev/null 2>&1 <<<"${json}"; then
+            layers=$(jq -r '.layers | length' <<<"${json}")
+            echo "single manifest, ${layers} layer(s): $(jq -r '.layers[0].digest' <<<"${json}")"
+            if [[ ${layers} != 1 ]]; then
+              echo "::error::${MOVING} has ${layers} layers; /docker-mods only extracts the first"
+              exit 1
+            fi
+          else
+            echo "index, entries:"
+            jq -r '.manifests[] | "  \(.platform.os)/\(.platform.architecture) \(.digest)"' <<<"${json}"
+            jq -e '[.manifests[] | select(.platform.architecture != "unknown")] | length > 0' >/dev/null <<<"${json}" ||
+              { echo "::error::${MOVING} index has no usable architecture entry"; exit 1; }
+          fi
+          echo "**** ${MOVING} is readable by /docker-mods ****"
 
       - name: summary
         env:

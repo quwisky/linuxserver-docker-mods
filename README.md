@@ -155,6 +155,15 @@ These are the failure modes that produce no error, just a mod that does nothing:
 - **More than one image layer.** `/docker-mods` reads `.layers[0]` of the
   manifest and ignores the rest, so a second `COPY` or `RUN` in the final stage
   is dropped. Consolidate in a build stage instead. CI gates on this.
+- **The wrong manifest media type.** `/docker-mods` fetches the manifest sending
+  only `application/vnd.docker.distribution.manifest.v2+json` and
+  `application/vnd.oci.image.index.v1+json`. A multi-platform build produces an
+  OCI *index*, which is accepted; a single-platform build produces a bare OCI
+  *image manifest*, which is not — the registry answers `404 MANIFEST_UNKNOWN`
+  and the mod quietly falls back to its cache, so on a fresh container it never
+  loads. `_mod-ci.yml` therefore publishes Docker media types for
+  single-platform mods, and asserts after every publish that the manifest is
+  actually readable with those exact Accept headers.
 - **`#!/command/with-contenv bash`.** LinuxServer replaces `/usr/bin/with-contenv`
   with its own UMASK-aware wrapper that then calls the `/command` one. Use
   `#!/usr/bin/with-contenv bash`, or lose `UMASK` support.

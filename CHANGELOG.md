@@ -17,6 +17,22 @@ numbered. See [Release channels](README.md#release-channels).
 
 ## [Unreleased]
 
+### Fixed
+
+- Single-platform mods published a manifest `/docker-mods` cannot read, so they
+  never loaded. It fetches the manifest sending only
+  `application/vnd.docker.distribution.manifest.v2+json` and
+  `application/vnd.oci.image.index.v1+json`; a multi-platform build yields an OCI
+  index (accepted), but a single-platform build yields a bare OCI image manifest
+  (not accepted), and the registry answers `404 MANIFEST_UNKNOWN`. The mod then
+  falls back to its cache, so on a fresh container nothing happens and the log
+  says only `digest could not be fetched`.
+
+  This affected **plex-vaapi-amdgpu-mod**, which is `linux/amd64` only.
+  Single-platform mods now publish Docker media types, and every publish asserts
+  the manifest is readable with those exact Accept headers, so it cannot regress
+  silently. **Republish any single-platform mod to pick this up.**
+
 ### Added
 
 - **qbittorrent-gluetun-portforward-mod** — keeps qBittorrent's listening port in
