@@ -40,6 +40,11 @@ else
     MODE="with-jq"
 fi
 
+# In a checkout the netns-watchdog helper still lives inside the mod's root/
+# overlay; the absolute path ./run defaults to only exists once the mod has been
+# applied to a container. Exported so the child shells clamp() spawns see it too.
+export NETNS_WATCHDOG_LIB="${HERE}/../root/usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh"
+
 # Resolve the source path relative to this script rather than the caller's cwd,
 # so `shellcheck -x` can follow it and see which globals ./run consumes.
 # shellcheck source-path=SCRIPTDIR
@@ -162,6 +167,202 @@ if state k a; then no 'repeat is not a transition' 1 0; else ok 'repeat is not a
 if state k b; then ok 'change is a transition'; else no 'change is a transition' 0 1; fi
 
 #------------------------------------------------------------------------------
+section "netns watchdog: the interface scan"
+#------------------------------------------------------------------------------
+# The whole feature rests on one signal: no non-loopback interface in
+# /sys/class/net. NETNS_SYSFS exists so this can be pointed at a temp directory.
+# Real entries there are symlinks into /sys/devices, but the scan only ever looks
+# at names, so plain files are a faithful stand-in.
+NETNS_TMP="$(mktemp -d)"
+trap 'rm -rf "${NETNS_TMP}"' EXIT
+
+# NETNS_SYSFS is an input to the sourced helper and is never read by this file,
+# so export it: that states the relationship, and without it shellcheck reports
+# every assignment below as dead (SC2034). The helper already gave it a value
+# when ./run sourced it, so this cannot leave it unset.
+export NETNS_SYSFS
+
+mknet() { # mknet <label> <iface...> -> prints the directory
+    local d="${NETNS_TMP}/$1"
+    shift
+    rm -rf "${d}"
+    mkdir -p "${d}"
+    local i
+    for i in "$@"; do : >"${d}/${i}"; done
+    printf '%s' "${d}"
+}
+
+has() { # has <name> <expected-rc> <iface...>
+    local name=$1 want=$2
+    shift 2
+    NETNS_SYSFS="$(mknet scan "$@")"
+    netns_has_network
+    eq "${name}" "${want}" "$?"
+}
+
+has 'lo only -> reports no network' 1 lo
+has 'lo + eth0 -> reports network' 0 lo eth0
+has 'lo + tun0 -> reports network' 0 lo tun0
+has 'eth0 alone -> reports network' 0 eth0
+has 'an empty sysfs -> reports no network' 1
+# bonding_masters is a control file the bonding module drops in this directory.
+# Counting it as an interface would make the watchdog permanently blind.
+has 'bonding_masters is not an interface' 1 lo bonding_masters
+
+NETNS_SYSFS="${NETNS_TMP}/no-such-dir"
+netns_has_network
+eq 'a missing sysfs is not evidence, so it reports network' 0 "$?"
+
+#------------------------------------------------------------------------------
+section "netns watchdog: the halt decision"
+#------------------------------------------------------------------------------
+# The real halt replaces this process, so it is stubbed. Everything up to and
+# including the decision is the code under test; only the exec is not.
+HALTED=0
+HALT_CODE=""
+netns_watchdog_halt() {
+    HALTED=1
+    HALT_CODE="${NETNS_EXIT_CODE}"
+    return 0
+}
+
+wd() { # wd <GLUETUN_PF_NETNS_* assignments...> -- configure a fresh watchdog
+    HALTED=0
+    HALT_CODE=""
+    unset GLUETUN_PF_NETNS_WATCHDOG GLUETUN_PF_NETNS_WATCHDOG_DRY_RUN \
+        GLUETUN_PF_NETNS_WATCHDOG_STRIKES GLUETUN_PF_NETNS_WATCHDOG_GRACE \
+        GLUETUN_PF_NETNS_WATCHDOG_EXIT_CODE
+    local a
+    for a in "$@"; do export "${a?}"; done
+    netns_watchdog_configure
+}
+
+# THE regression that matters. Everyone already pulling :latest has this flag
+# unset, and for them the watchdog must be inert -- no strikes, no halt, nothing.
+wd
+NETNS_SYSFS="$(mknet dead lo)"
+for _ in 1 2 3 4 5 6 7 8; do netns_watchdog_check; done
+eq 'flag unset: never halts, even in a dead namespace' 0 "${HALTED}"
+eq 'flag unset: records no strikes' 0 "${NETNS_STRIKES}"
+if netns_watchdog_enabled; then
+    no 'flag unset: reports disabled' disabled enabled
+else
+    ok 'flag unset: reports disabled'
+fi
+
+for v in false 0 no off disabled; do
+    wd "GLUETUN_PF_NETNS_WATCHDOG=${v}"
+    NETNS_SYSFS="$(mknet dead lo)"
+    netns_watchdog_check
+    netns_watchdog_check
+    if ((HALTED)); then
+        no "GLUETUN_PF_NETNS_WATCHDOG=${v} stays off" 0 1
+    else
+        ok "GLUETUN_PF_NETNS_WATCHDOG=${v} stays off"
+    fi
+done
+
+# Armed: strikes must accumulate across iterations and only then halt.
+wd GLUETUN_PF_NETNS_WATCHDOG=true GLUETUN_PF_NETNS_WATCHDOG_GRACE=0
+NETNS_SYSFS="$(mknet dead lo)"
+netns_watchdog_check
+eq 'armed: first failed check is strike 1' 1 "${NETNS_STRIKES}"
+eq 'armed: one strike does not halt' 0 "${HALTED}"
+netns_watchdog_check
+netns_watchdog_check
+eq 'armed: three strikes still do not halt' 0 "${HALTED}"
+netns_watchdog_check
+eq 'armed: the fourth strike halts' 1 "${HALTED}"
+eq 'armed: halts with the default exit code' 70 "${HALT_CODE}"
+
+# A container whose /sys is not mounted must never be halted on that basis.
+wd GLUETUN_PF_NETNS_WATCHDOG=true GLUETUN_PF_NETNS_WATCHDOG_GRACE=0 \
+    GLUETUN_PF_NETNS_WATCHDOG_STRIKES=1
+NETNS_SYSFS="${NETNS_TMP}/no-such-dir"
+netns_watchdog_check
+netns_watchdog_check
+eq 'a missing sysfs never halts, whatever the strike count' 0 "${HALTED}"
+
+# Recovery. Note the redirect rather than $( ): netns_watchdog_check mutates
+# NETNS_STRIKES, and a command substitution would run it in a subshell and throw
+# every assignment away.
+wd GLUETUN_PF_NETNS_WATCHDOG=true GLUETUN_PF_NETNS_WATCHDOG_GRACE=0
+NETNS_SYSFS="$(mknet dead lo)"
+netns_watchdog_check
+netns_watchdog_check
+eq 'two failed checks give two strikes' 2 "${NETNS_STRIKES}"
+NETNS_SYSFS="$(mknet alive lo eth0)"
+netns_watchdog_check >"${NETNS_TMP}/recovered.log"
+eq 'a recovered namespace resets the strikes' 0 "${NETNS_STRIKES}"
+if grep -q 'recovered' "${NETNS_TMP}/recovered.log"; then
+    ok 'the recovery is logged'
+else
+    no 'the recovery is logged' 'a line saying "recovered"' "$(cat "${NETNS_TMP}/recovered.log")"
+fi
+netns_watchdog_check
+netns_watchdog_check
+netns_watchdog_check
+netns_watchdog_check
+eq 'and a recovered namespace never halts' 0 "${HALTED}"
+
+# The grace period covers container start, where the namespace is legitimately
+# still being built.
+wd GLUETUN_PF_NETNS_WATCHDOG=true GLUETUN_PF_NETNS_WATCHDOG_GRACE=999999 \
+    GLUETUN_PF_NETNS_WATCHDOG_STRIKES=1
+NETNS_SYSFS="$(mknet dead lo)"
+netns_watchdog_check
+netns_watchdog_check
+eq 'inside the grace period nothing is counted' 0 "${NETNS_STRIKES}"
+eq 'inside the grace period nothing halts' 0 "${HALTED}"
+
+# Dry run reaches the decision and stops there.
+wd GLUETUN_PF_NETNS_WATCHDOG=true GLUETUN_PF_NETNS_WATCHDOG_DRY_RUN=true \
+    GLUETUN_PF_NETNS_WATCHDOG_GRACE=0 GLUETUN_PF_NETNS_WATCHDOG_STRIKES=2
+NETNS_SYSFS="$(mknet dead lo)"
+netns_watchdog_check
+netns_watchdog_check >"${NETNS_TMP}/dryrun.log"
+netns_watchdog_check
+eq 'dry run reaches the threshold' 3 "${NETNS_STRIKES}"
+eq 'dry run never halts' 0 "${HALTED}"
+if grep -q 'DRY RUN' "${NETNS_TMP}/dryrun.log"; then
+    ok 'dry run says what it would have done'
+else
+    no 'dry run says what it would have done' 'a DRY RUN line' "$(cat "${NETNS_TMP}/dryrun.log")"
+fi
+
+wd GLUETUN_PF_NETNS_WATCHDOG=true GLUETUN_PF_NETNS_WATCHDOG_GRACE=0 \
+    GLUETUN_PF_NETNS_WATCHDOG_STRIKES=1 GLUETUN_PF_NETNS_WATCHDOG_EXIT_CODE=42
+NETNS_SYSFS="$(mknet dead lo)"
+netns_watchdog_check
+eq 'a custom exit code is used' 42 "${HALT_CODE}"
+
+# Load-bearing, not tidiness: wd() exports the GLUETUN_PF_NETNS_* it is given,
+# and clamp() below runs `env <assignments> bash`, which inherits this
+# environment. Leaving EXIT_CODE=42 exported here would fail the clamp asserting
+# the default of 70.
+wd
+
+#------------------------------------------------------------------------------
+section "netns watchdog: ./run survives the helper being absent"
+#------------------------------------------------------------------------------
+# A partial overlay must not break the poll loop. ./run defines no-op stubs when
+# the helper cannot be sourced, so the mod behaves exactly as it did before this
+# feature existed -- even with the flag explicitly turned on.
+absent="$(
+    NETNS_WATCHDOG_LIB=/nonexistent/netns-watchdog.sh \
+        GLUETUN_PF_NETNS_WATCHDOG=true \
+        bash -c '
+            GLUETUN_PF_LIB_ONLY=1 source "$1"
+            configure >/dev/null
+            if netns_watchdog_enabled; then echo enabled; else echo disabled; fi
+            netns_watchdog_check && echo check-is-a-noop
+        ' _ "${RUN}" 2>&1
+)"
+eq 'helper absent: disabled and inert even with the flag on' \
+    'disabled
+check-is-a-noop' "${absent}"
+
+#------------------------------------------------------------------------------
 section "configure(): defaults and clamping"
 #------------------------------------------------------------------------------
 clamp() { # clamp <name> <var> <expected> [env assignments...]
@@ -195,6 +396,26 @@ clamp 'gluetun auth desc: none' GT_AUTH_DESC none
 clamp 'gluetun auth desc: apikey' GT_AUTH_DESC 'X-API-Key header' GLUETUN_PF_APIKEY=abc
 clamp 'qbt auth mode: bypass' QBT_AUTH_MODE "none (relies on qBittorrent's localhost auth bypass)"
 clamp 'qbt auth mode: login' QBT_AUTH_MODE "login as 'admin'" GLUETUN_PF_QBT_USERNAME=admin
+
+# The watchdog's own knobs, through the mod's real configure(). Default off is
+# the load-bearing one: it is what keeps existing containers byte-identical.
+clamp 'netns watchdog defaults OFF' NETNS_WATCHDOG 0
+clamp 'netns watchdog: empty value is off' NETNS_WATCHDOG 0 GLUETUN_PF_NETNS_WATCHDOG=
+clamp 'netns watchdog: true arms it' NETNS_WATCHDOG 1 GLUETUN_PF_NETNS_WATCHDOG=true
+clamp 'netns watchdog: false leaves it off' NETNS_WATCHDOG 0 GLUETUN_PF_NETNS_WATCHDOG=false
+clamp 'strikes default' NETNS_STRIKES_MAX 4
+clamp 'strikes 2 is honoured' NETNS_STRIKES_MAX 2 GLUETUN_PF_NETNS_WATCHDOG_STRIKES=2
+clamp 'strikes "lots" clamps to 4' NETNS_STRIKES_MAX 4 GLUETUN_PF_NETNS_WATCHDOG_STRIKES=lots
+clamp 'strikes 0 clamps to 4' NETNS_STRIKES_MAX 4 GLUETUN_PF_NETNS_WATCHDOG_STRIKES=0
+clamp 'grace default' NETNS_GRACE 60
+clamp 'grace 0 is honoured' NETNS_GRACE 0 GLUETUN_PF_NETNS_WATCHDOG_GRACE=0
+clamp 'grace "60s" clamps to 60' NETNS_GRACE 60 GLUETUN_PF_NETNS_WATCHDOG_GRACE=60s
+clamp 'exit code default' NETNS_EXIT_CODE 70
+clamp 'exit code 42 is honoured' NETNS_EXIT_CODE 42 GLUETUN_PF_NETNS_WATCHDOG_EXIT_CODE=42
+# Zero would look like a clean exit, and `restart: on-failure` would then leave
+# the container stopped -- the exact opposite of the point.
+clamp 'exit code 0 is rejected' NETNS_EXIT_CODE 70 GLUETUN_PF_NETNS_WATCHDOG_EXIT_CODE=0
+clamp 'exit code 256 is rejected' NETNS_EXIT_CODE 70 GLUETUN_PF_NETNS_WATCHDOG_EXIT_CODE=256
 
 #------------------------------------------------------------------------------
 printf '\n'

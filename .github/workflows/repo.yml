@@ -25,6 +25,13 @@ jobs:
       - name: every mod has a CI workflow, and every workflow has a mod
         run: ci/check-mod-workflows.sh
 
+      - name: files shipped by more than one mod are byte-identical
+        # Belongs here rather than in a mod's own workflow precisely because this
+        # one has no paths filter: a commit that edits one copy of a shared file
+        # and not the other only touches one mod's directory, so only that mod's
+        # workflow would run and the drift would go unnoticed.
+        run: ci/check-shared-files.sh
+
       - name: shellcheck the shared tooling and the template
         # Per-mod scripts are checked by that mod's own workflow; these belong to
         # no mod, so nothing else would ever look at them.
