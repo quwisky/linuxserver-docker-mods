@@ -54,6 +54,28 @@
 #     set up early in container start.
 #   * N consecutive failed checks, not one.
 #   * A dry-run mode that logs the decision and halts nothing.
+#   * A cap on how many times it will halt before giving up, so a container
+#     where halting does not actually recover anything cannot be restarted in a
+#     loop forever. See the state-file note below.
+#
+#-------------------------------------------------------------------------------
+# The one thing this writes
+#
+# Counting halt attempts means surviving the halt, which ends the process -- so
+# the count cannot live in a shell variable. It goes in one small file under
+# /run, and it is the only thing either mod writes anywhere.
+#
+# /run is NOT a tmpfs in the linuxserver images: it is part of the container's
+# writable layer and survives `docker restart`. A bare counter there would
+# therefore also count SUCCESSFUL recoveries, and after a few legitimate gluetun
+# restarts the watchdog would give up permanently. So the file is stamped with a
+# token identifying this container start, and a count from a previous start is
+# read as zero.
+#
+# The token is PID 1's start time from /proc/1/stat, which changes when the
+# container restarts (the halt worked) and does not change when s6 merely
+# restarts this service (the halt did not work) -- exactly the distinction the
+# cap needs to make.
 #===============================================================================
 
 #-------------------------------------------------------------------------------
@@ -104,6 +126,10 @@ NETNS_EXITCODE_DIR=/run/s6-linux-init-container-results
 NETNS_HALT_BIN=/run/s6/basedir/bin/halt
 NETNS_SERVICE_DIR=/run/service
 
+NETNS_MAX_HALTS=3       # halt attempts per container start before giving up
+NETNS_STATE_DIR=/run/mod-gluetun-portforward
+NETNS_BOOT_TOKEN=""     # empty = derive it from PID 1; set directly by the tests
+
 #-------------------------------------------------------------------------------
 # netns_watchdog_configure(): env -> globals. Called from the mod's configure(),
 # so that sourcing ./run with GLUETUN_PF_LIB_ONLY=1 still has no side effects.
@@ -150,6 +176,75 @@ netns_watchdog_configure() {
         loud "GLUETUN_PF_NETNS_WATCHDOG_EXIT_CODE='${NETNS_EXIT_CODE}' is not a number 1-255, using 70"
         NETNS_EXIT_CODE=70
     fi
+
+    # 0 means "never give up", which is the old unbounded behaviour for anyone
+    # who wants it back.
+    NETNS_MAX_HALTS="${GLUETUN_PF_NETNS_WATCHDOG_MAX_HALTS:-3}"
+    if ! is_uint "${NETNS_MAX_HALTS}"; then
+        loud "GLUETUN_PF_NETNS_WATCHDOG_MAX_HALTS='${NETNS_MAX_HALTS}' is not a number, using 3"
+        NETNS_MAX_HALTS=3
+    fi
+    return 0
+}
+
+#-------------------------------------------------------------------------------
+# Halt bookkeeping. See the state-file note at the top of this file for why the
+# count is stamped with a per-container-start token rather than stored bare.
+#-------------------------------------------------------------------------------
+# netns_boot_token -> prints a value that is stable for this container start and
+# different after a restart. Pure bash: no stat, no external command.
+netns_boot_token() {
+    if [[ -n ${NETNS_BOOT_TOKEN} ]]; then
+        printf '%s' "${NETNS_BOOT_TOKEN}"
+        return 0
+    fi
+    local line
+    local -a fields
+    [[ -r /proc/1/stat ]] || return 1
+    read -r line </proc/1/stat 2>/dev/null || return 1
+    # Field 2 is the executable name in parentheses and may itself contain spaces
+    # or a ')', so split after the LAST ') '. What remains starts at field 3,
+    # which puts starttime (field 22) at index 19.
+    line="${line##*') '}"
+    # shellcheck disable=SC2206  # deliberate word splitting; these are all numbers
+    fields=(${line})
+    [[ -n ${fields[19]-} ]] || return 1
+    printf '%s' "${fields[19]}"
+}
+
+# netns_halt_attempts -> prints how many times we have halted this container
+# start. Anything unreadable, malformed or stamped with another start is 0.
+netns_halt_attempts() {
+    local token stamp count file="${NETNS_STATE_DIR}/halt-attempts"
+    token="$(netns_boot_token)" || { printf '0'; return 0; }
+    # Tested before the redirect, not with `2>/dev/null` on it: redirections are
+    # applied left to right, so the shell has already printed its own "no such
+    # file" to the real stderr by the time the suppression takes effect.
+    [[ -r ${file} ]] || { printf '0'; return 0; }
+    if ! read -r stamp count <"${file}"; then
+        printf '0'
+        return 0
+    fi
+    if [[ ${stamp} != "${token}" ]] || ! is_uint "${count-}"; then
+        printf '0'
+        return 0
+    fi
+    printf '%s' "${count}"
+}
+
+# Returns non-zero if the attempt could not be persisted. The caller halts
+# anyway: failing to keep count is not a reason to leave a container stranded.
+netns_record_halt_attempt() {
+    local token next
+    token="$(netns_boot_token)" || return 1
+    next=$(($(netns_halt_attempts) + 1))
+    mkdir -p "${NETNS_STATE_DIR}" 2>/dev/null || return 1
+    printf '%s %s\n' "${token}" "${next}" >"${NETNS_STATE_DIR}/halt-attempts" 2>/dev/null || return 1
+    return 0
+}
+
+netns_clear_halt_attempts() {
+    rm -f "${NETNS_STATE_DIR}/halt-attempts" 2>/dev/null
     return 0
 }
 
@@ -243,6 +338,9 @@ netns_watchdog_check() {
     if netns_has_network; then
         if ((NETNS_STRIKES > 0)); then
             loud "network namespace recovered after ${NETNS_STRIKES} strike(s); watchdog reset"
+            # It sorted itself out, so a later, unrelated orphaning deserves the
+            # full budget rather than whatever this episode left over.
+            netns_clear_halt_attempts
         fi
         NETNS_STRIKES=0
         NETNS_GRACE_LOGGED=0
@@ -277,5 +375,24 @@ netns_watchdog_check() {
         return 0
     fi
 
+    # Halting is only a recovery if the container actually comes back attached.
+    # When it does not -- no restart policy, or a shutdown that cannot complete --
+    # s6 restarts this service, the grace period re-arms, and we would halt again
+    # on a loop forever. Bound it.
+    local attempts
+    attempts="$(netns_halt_attempts)"
+    if ((NETNS_MAX_HALTS > 0 && attempts >= NETNS_MAX_HALTS)); then
+        loud "already halted ${attempts} time(s) since this container started and it is still stranded; giving up"
+        log "  -> halting is plainly not recovering this container, so continuing would just restart it forever."
+        log "  -> check it has 'restart: unless-stopped' (or 'on-failure'): without a restart policy the halt stops it for good."
+        log "  -> check gluetun itself is running, since docker will not start a container whose 'network_mode: service:' target is down."
+        log "  -> the watchdog is now off until this container is restarted. The port sync carries on regardless."
+        NETNS_WATCHDOG=0
+        return 0
+    fi
+
+    if ! netns_record_halt_attempt; then
+        log "could not record the halt attempt under ${NETNS_STATE_DIR}; halting anyway, but the give-up cap will not apply"
+    fi
     netns_watchdog_halt
 }

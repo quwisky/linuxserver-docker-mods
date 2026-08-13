@@ -14,16 +14,21 @@
 #    fallible call is checked explicitly and every global is initialised below,
 #    with shellcheck in CI catching what `set -u` would have.
 #
-#  * Writes nothing to disk, ever. Reads Preferences.xml only, and only to
-#    extract PlexOnlineToken. That makes LSIO_READ_ONLY_FS a non-event.
+#  * Touches nothing under /config. Reads Preferences.xml only, and only to
+#    extract PlexOnlineToken. That makes LSIO_READ_ONLY_FS a non-event. The one
+#    file this writes anywhere is the netns watchdog's halt counter under /run,
+#    written only while that opt-in feature is armed and treated as
+#    best-effort -- see netns-watchdog.sh.
 #
-#  * Runs as the container's default identity: no s6-setuidgid, no lsiown. We
-#    create no files, so there is no ownership to get wrong, and this keeps
-#    LSIO_NON_ROOT_USER working with zero special-casing (following the usual
-#    `s6-setuidgid abc` idiom would actually have broken there).
+#  * Runs as the container's default identity: no s6-setuidgid, no lsiown. The
+#    only file we create is that counter, in a directory we make ourselves, so
+#    there is no ownership to get wrong and LSIO_NON_ROOT_USER needs no
+#    special-casing (following the usual `s6-setuidgid abc` idiom would
+#    actually have broken there).
 #
-#  * All state lives in shell variables. A restart is always safe: the loop
-#    re-reads Plex's actual settings and re-converges.
+#  * All state lives in shell variables, bar that counter -- which has to
+#    outlive the halt, because the halt ends the process. A restart is always
+#    safe: the loop re-reads Plex's actual settings and re-converges.
 #
 #  * Never restarts Plex. Never edits Preferences.xml. Never touches
 #    allowedNetworks or customConnections. Never unpublishes on port loss.
@@ -651,7 +656,11 @@ main() {
         if ((NETNS_DRY_RUN)); then
             log "netns watchdog         : DRY RUN, ${NETNS_STRIKES_MAX} strikes, ${NETNS_GRACE}s grace (logs the decision, halts nothing)"
         else
-            log "netns watchdog         : armed, ${NETNS_STRIKES_MAX} strikes, ${NETNS_GRACE}s grace, halts with exit ${NETNS_EXIT_CODE}"
+            if ((NETNS_MAX_HALTS > 0)); then
+                log "netns watchdog         : armed, ${NETNS_STRIKES_MAX} strikes, ${NETNS_GRACE}s grace, exit ${NETNS_EXIT_CODE}, gives up after ${NETNS_MAX_HALTS} halt(s)"
+            else
+                log "netns watchdog         : armed, ${NETNS_STRIKES_MAX} strikes, ${NETNS_GRACE}s grace, exit ${NETNS_EXIT_CODE}, never gives up"
+            fi
             log "  -> needs 'restart: unless-stopped' on this container, or halting it is not a recovery"
         fi
     fi

@@ -321,7 +321,7 @@ wd() { # wd <GLUETUN_PF_NETNS_* assignments...> -- configure a fresh watchdog
     HALT_CODE=""
     unset GLUETUN_PF_NETNS_WATCHDOG GLUETUN_PF_NETNS_WATCHDOG_DRY_RUN \
         GLUETUN_PF_NETNS_WATCHDOG_STRIKES GLUETUN_PF_NETNS_WATCHDOG_GRACE \
-        GLUETUN_PF_NETNS_WATCHDOG_EXIT_CODE
+        GLUETUN_PF_NETNS_WATCHDOG_EXIT_CODE GLUETUN_PF_NETNS_WATCHDOG_MAX_HALTS
     local a
     for a in "$@"; do export "${a?}"; done
     netns_watchdog_configure
@@ -434,6 +434,116 @@ NETNS_SYSFS="$(mknet dead lo)"
 netns_watchdog_check
 eq 'a custom exit code is used' 42 "${HALT_CODE}"
 
+#------------------------------------------------------------------------------
+section "netns watchdog: giving up after N halts"
+#------------------------------------------------------------------------------
+# Halting only recovers the container if it actually comes back. When it does
+# not, s6 restarts this service and the whole cycle repeats -- so the attempt
+# count has to outlive the process, which is what the /run state file is for.
+# Both are inputs to the sourced helper that nothing here reads back.
+export NETNS_STATE_DIR NETNS_BOOT_TOKEN
+NETNS_STATE_DIR="${NETNS_TMP}/state"
+NETNS_BOOT_TOKEN="boot-A"
+
+halts_until_giveup() { # -> how many times it halted before disarming
+    local n=0 i
+    wd GLUETUN_PF_NETNS_WATCHDOG=true GLUETUN_PF_NETNS_WATCHDOG_GRACE=0 \
+        GLUETUN_PF_NETNS_WATCHDOG_STRIKES=1 "$@"
+    NETNS_SYSFS="$(mknet dead lo)"
+    for i in 1 2 3 4 5 6 7 8; do
+        HALTED=0
+        # Each iteration stands in for one service restart after a failed halt:
+        # the strike counter resets, but the on-disk attempt count does not.
+        NETNS_STRIKES=0
+        netns_watchdog_check >/dev/null
+        ((HALTED)) && n=$((n + 1))
+    done
+    printf '%s' "${n}"
+}
+
+rm -rf "${NETNS_STATE_DIR}"
+eq 'gives up after the default 3 halts' 3 "$(halts_until_giveup)"
+
+# Asserted here rather than after halts_until_giveup: that runs inside $( ), and
+# a command substitution is a subshell, so the NETNS_WATCHDOG=0 the give-up
+# branch performs would be thrown away before this could see it.
+rm -rf "${NETNS_STATE_DIR}"
+wd GLUETUN_PF_NETNS_WATCHDOG=true GLUETUN_PF_NETNS_WATCHDOG_GRACE=0 \
+    GLUETUN_PF_NETNS_WATCHDOG_STRIKES=1 GLUETUN_PF_NETNS_WATCHDOG_MAX_HALTS=1
+NETNS_SYSFS="$(mknet dead lo)"
+NETNS_STRIKES=0
+netns_watchdog_check >/dev/null # halts, attempt 1 of 1
+NETNS_STRIKES=0
+netns_watchdog_check >"${NETNS_TMP}/giveup.log" # budget spent -> gives up
+if netns_watchdog_enabled; then
+    no 'the watchdog disarms itself once it gives up' disabled enabled
+else
+    ok 'the watchdog disarms itself once it gives up'
+fi
+if grep -q 'giving up' "${NETNS_TMP}/giveup.log"; then
+    ok 'and says so'
+else
+    no 'and says so' 'a "giving up" line' "$(cat "${NETNS_TMP}/giveup.log")"
+fi
+if grep -q "restart: unless-stopped" "${NETNS_TMP}/giveup.log"; then
+    ok 'and names the most likely cause'
+else
+    no 'and names the most likely cause' 'a restart-policy hint' "$(cat "${NETNS_TMP}/giveup.log")"
+fi
+
+rm -rf "${NETNS_STATE_DIR}"
+eq 'the cap is configurable' 1 "$(halts_until_giveup GLUETUN_PF_NETNS_WATCHDOG_MAX_HALTS=1)"
+
+rm -rf "${NETNS_STATE_DIR}"
+eq 'MAX_HALTS=0 means never give up' 8 "$(halts_until_giveup GLUETUN_PF_NETNS_WATCHDOG_MAX_HALTS=0)"
+
+# A count left by a PREVIOUS container start must not be spent by this one --
+# otherwise a few successful recoveries over a container's life would silently
+# use up the budget. /run survives `docker restart` in these images, so the
+# stamp is the only thing separating the two cases.
+rm -rf "${NETNS_STATE_DIR}"
+mkdir -p "${NETNS_STATE_DIR}"
+printf 'boot-OLD 99\n' >"${NETNS_STATE_DIR}/halt-attempts"
+eq 'a count from an earlier container start is ignored' 3 "$(halts_until_giveup)"
+
+rm -rf "${NETNS_STATE_DIR}"
+mkdir -p "${NETNS_STATE_DIR}"
+printf 'garbage\n' >"${NETNS_STATE_DIR}/halt-attempts"
+eq 'a malformed state file is treated as zero' 3 "$(halts_until_giveup)"
+
+# Recovery hands the budget back.
+rm -rf "${NETNS_STATE_DIR}"
+wd GLUETUN_PF_NETNS_WATCHDOG=true GLUETUN_PF_NETNS_WATCHDOG_GRACE=0 \
+    GLUETUN_PF_NETNS_WATCHDOG_STRIKES=1
+NETNS_SYSFS="$(mknet dead lo)"
+netns_watchdog_check >/dev/null
+eq 'one halt is recorded' 1 "$(netns_halt_attempts)"
+NETNS_SYSFS="$(mknet alive lo eth0)"
+netns_watchdog_check >/dev/null
+eq 'and a natural recovery clears the record' 0 "$(netns_halt_attempts)"
+
+# Bookkeeping that cannot be written must never block the halt itself.
+rm -rf "${NETNS_STATE_DIR}"
+NETNS_STATE_DIR=/proc/definitely/not/writable
+wd GLUETUN_PF_NETNS_WATCHDOG=true GLUETUN_PF_NETNS_WATCHDOG_GRACE=0 \
+    GLUETUN_PF_NETNS_WATCHDOG_STRIKES=1
+NETNS_SYSFS="$(mknet dead lo)"
+HALTED=0
+netns_watchdog_check >/dev/null
+eq 'an unwritable state dir still halts' 1 "${HALTED}"
+NETNS_STATE_DIR="${NETNS_TMP}/state"
+
+# The real token must be derivable in this environment, since everything above
+# stubbed it out.
+NETNS_BOOT_TOKEN=""
+tok="$(netns_boot_token)"
+if [[ ${tok} =~ ^[0-9]+$ ]]; then
+    ok "the boot token is derived from PID 1 (${tok})"
+else
+    no 'the boot token is derived from PID 1' 'digits' "${tok}"
+fi
+NETNS_BOOT_TOKEN="boot-A"
+
 # Load-bearing, not tidiness: wd() exports the GLUETUN_PF_NETNS_* it is given,
 # and clamp() below runs `env <assignments> bash`, which inherits this
 # environment. Leaving EXIT_CODE=42 exported here would fail the clamp asserting
@@ -514,6 +624,10 @@ clamp 'exit code 42 is honoured' NETNS_EXIT_CODE 42 GLUETUN_PF_NETNS_WATCHDOG_EX
 # the container stopped -- the exact opposite of the point.
 clamp 'exit code 0 is rejected' NETNS_EXIT_CODE 70 GLUETUN_PF_NETNS_WATCHDOG_EXIT_CODE=0
 clamp 'exit code 256 is rejected' NETNS_EXIT_CODE 70 GLUETUN_PF_NETNS_WATCHDOG_EXIT_CODE=256
+clamp 'max halts default' NETNS_MAX_HALTS 3
+clamp 'max halts 1 is honoured' NETNS_MAX_HALTS 1 GLUETUN_PF_NETNS_WATCHDOG_MAX_HALTS=1
+clamp 'max halts 0 means unlimited' NETNS_MAX_HALTS 0 GLUETUN_PF_NETNS_WATCHDOG_MAX_HALTS=0
+clamp 'max halts bad value clamps to 3' NETNS_MAX_HALTS 3 GLUETUN_PF_NETNS_WATCHDOG_MAX_HALTS=lots
 
 #------------------------------------------------------------------------------
 printf '\n'

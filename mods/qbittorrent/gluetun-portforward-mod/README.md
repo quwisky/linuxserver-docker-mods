@@ -266,6 +266,32 @@ With no policy, the container simply stops and stays stopped. `unless-stopped` o
 | `GLUETUN_PF_NETNS_WATCHDOG_STRIKES` | `4` | Consecutive failed checks before halting. Clamped to ≥ 1. |
 | `GLUETUN_PF_NETNS_WATCHDOG_GRACE` | `60` | Seconds after the service starts before the watchdog arms, because the namespace is still being set up early in container start. |
 | `GLUETUN_PF_NETNS_WATCHDOG_EXIT_CODE` | `70` | Exit status. Must be 1–255, so `restart: on-failure` also works. |
+| `GLUETUN_PF_NETNS_WATCHDOG_MAX_HALTS` | `3` | How many times it will halt in one container lifetime before concluding that halting is not helping and switching itself off. `0` means never give up. |
+
+### When halting does not help
+
+Halting only recovers the container if it actually comes back. If it does not —
+no `restart:` policy, or a shutdown that cannot complete — s6 restarts just this
+service, the grace period re-arms, and without a cap the container would be
+halted on a loop indefinitely.
+
+So after `GLUETUN_PF_NETNS_WATCHDOG_MAX_HALTS` attempts it stops trying, says
+why, and leaves the port sync running:
+
+```
+[mod-gluetun-portforward] **** already halted 3 time(s) since this container started and it is still stranded; giving up ****
+[mod-gluetun-portforward]   -> halting is plainly not recovering this container, so continuing would just restart it forever.
+[mod-gluetun-portforward]   -> check it has 'restart: unless-stopped' (or 'on-failure'): without a restart policy the halt stops it for good.
+[mod-gluetun-portforward]   -> the watchdog is now off until this container is restarted. The port sync carries on regardless.
+```
+
+The count is per **container start**, not cumulative: a halt that works gets you
+a fresh container and a fresh budget, so normal gluetun restarts never use it up.
+Only *failed* halts accumulate. A namespace that recovers on its own also hands
+the budget back.
+
+This is the one thing either mod writes anywhere — a single small file under
+`/run`, because the count has to survive the halt, and the halt ends the process.
 
 **How long it actually takes:** roughly **30–40 seconds** after gluetun goes
 away, not `4 × 60`. A dead namespace also means gluetun's control server is

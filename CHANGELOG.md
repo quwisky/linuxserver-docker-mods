@@ -38,6 +38,16 @@ numbered. See [Release channels](README.md#release-channels).
   of gluetun's control server is deliberately not used, since it cannot tell the
   two apart. The scan is pure bash against `/sys` — no new packages.
 
+  It also gives up. Halting is only a recovery if the container comes back, and
+  when it does not — no `restart:` policy, or a shutdown that cannot complete —
+  s6 restarts the service and the cycle would repeat forever. After
+  `_MAX_HALTS` attempts (default 3) the watchdog switches itself off, says why,
+  and leaves the port sync running. The count is per container start rather than
+  cumulative, so halts that work never use the budget up; only failed ones do.
+  Keeping that count means writing one small file under `/run`, which is the
+  only thing either mod writes anywhere — the count has to outlive the halt,
+  and the halt ends the process.
+
   `restart: unless-stopped` (or `on-failure`) is required; halting is only half
   the mechanism. The halt is graceful, so s6 runs the shutdown sequence and the
   application closes its files properly — qBittorrent writes its fastresume data,
