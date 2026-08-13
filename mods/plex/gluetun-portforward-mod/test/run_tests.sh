@@ -49,7 +49,7 @@ fi
 # In a checkout the netns-watchdog helper still lives inside the mod's root/
 # overlay; the absolute path ./run defaults to only exists once the mod has been
 # applied to a container. Exported so the child shells clamp() spawns see it too.
-export GLUETUN_PF_NETNS_WATCHDOG_LIB="${HERE}/../root/usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh"
+export GLUETUN_PF_NETNS_WATCHDOG_LIB="${HERE}/../../../../shared/mod-gluetun-portforward/netns-watchdog.sh"
 
 # Resolve the source path relative to this script rather than the caller's cwd,
 # so `shellcheck -x` can follow it and see which globals ./run consumes.

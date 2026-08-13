@@ -1,0 +1,16 @@
+# The build context is the repo root, because a mod's Dockerfile may need both
+# its own mods/<app>/<mod>/root/ and a directory under shared/.
+#
+# Nothing here changes what reaches an image -- every Dockerfile COPYs explicit
+# paths -- this only keeps the context small and stops unrelated churn from
+# being sent to the daemon on every build.
+.git
+.github
+.remember
+docs
+site
+ci
+template
+*.md
+**/test
+**/.DS_Store

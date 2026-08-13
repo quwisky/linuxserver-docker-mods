@@ -64,7 +64,7 @@ build_runner() {
     # Ship the netns-watchdog helper at the absolute path ./run looks for, so
     # these scenarios exercise the real code path rather than the no-op stubs
     # ./run falls back to when the helper is missing.
-    cp "${REPO}/root/usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh" "${d}/netns-watchdog.sh"
+    cp "${REPO}/../../../shared/mod-gluetun-portforward/netns-watchdog.sh" "${d}/netns-watchdog.sh"
     # The real shebang is #!/usr/bin/with-contenv bash, which only exists in an
     # LSIO image, so invoke bash explicitly. The script body is plain bash, and
     # bash+curl+jq is exactly what linuxserver/plex already provides.

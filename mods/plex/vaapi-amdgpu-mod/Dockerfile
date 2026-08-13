@@ -41,7 +41,7 @@ RUN [ -f /usr/share/libdrm/amdgpu.ids ] && \
     cp /usr/share/libdrm/amdgpu.ids /source/usr/share/libdrm/ || true
 
 # Copy the s6-overlay init scripts (correct structure for v3)
-COPY root/ /source/
+COPY mods/plex/vaapi-amdgpu-mod/root/ /source/
 
 # Make init scripts executable
 RUN chmod +x /source/etc/s6-overlay/s6-rc.d/*/run 2>/dev/null || true

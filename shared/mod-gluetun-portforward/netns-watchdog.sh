@@ -2,10 +2,18 @@
 #===============================================================================
 # netns-watchdog -- detect a container stranded in a dead network namespace.
 #
-# THIS FILE IS DUPLICATED VERBATIM IN EVERY gluetun-portforward MOD.
-# ci/check-shared-files.sh asserts the copies are byte-identical and runs from
-# repo.yml, which has no paths filter -- so editing one copy and not the other
-# fails CI even when only one mod's directory changed. Edit all copies together.
+# ONE COPY, SHARED BY EVERY gluetun-portforward MOD.
+#
+# Mods are separate single-layer images, so this cannot simply be included: each
+# Dockerfile COPYs this directory in a scratch assembly stage, and the final
+# stage takes the result in one COPY --from. The build context is the repo root
+# to make that reachable.
+#
+# Editing this file therefore changes several published images at once.
+# ci/check-shared-files.sh keeps that honest -- every mod copying this directory
+# must carry a paths filter for it, so its tests and its build actually run, and
+# ci/mod-inputs.sh folds it into the nightly content hash so the publish is not
+# deduped away.
 #
 # No shebang: this is sourced, never executed. It is deliberately NOT executable,
 # which also keeps it out of the executable-bit check CI applies to run/finish.

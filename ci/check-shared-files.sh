@@ -1,49 +1,100 @@
 #!/usr/bin/env bash
-# Any file that more than one mod overlays at the SAME container path must be
-# byte-identical in every mod that ships it.
+# The invariants that make shared/ safe.
 #
 #   ci/check-shared-files.sh
 #
-# Two reasons this is a rule rather than a preference:
+# A mod's build context is the repo root, so a Dockerfile can COPY a directory
+# out of shared/ in addition to its own root/. That removes the need to duplicate
+# a file per mod, and introduces three new ways to be quietly wrong:
 #
-#  1. Correctness. A mod is a filesystem overlay, and DOCKER_MODS applies several
-#     of them to one container in order. Two mods shipping different content at
-#     one path means whichever is listed last silently wins, and the loser's mod
-#     is subtly broken with nothing in the log to say so.
+#  1. A mod copies a shared/ directory that does not exist. The build fails
+#     loudly, so this is only checked for completeness.
 #
-#  2. Drift. Mods are independent single-layer images built with `FROM scratch` +
-#     `COPY root/ /` from their own directory as build context, so there is no
-#     cross-mod include mechanism -- genuinely shared logic has to be duplicated.
-#     Duplication is fine as long as it cannot rot, and this is what stops it.
-#     `netns-watchdog.sh` is the current case.
+#  2. A mod copies shared/X but its workflow has no paths filter for it. Per-mod
+#     workflows are gated on their own directory, so editing shared/X alone would
+#     change that mod's image WITHOUT running its tests or its build. This is the
+#     serious one, and it is the same class of failure as a mod having no
+#     workflow at all -- silent, and permanent until someone notices.
 #
-# This runs from repo.yml, which has NO paths filter, so it fires on every push.
-# That is the whole point: the per-mod workflows only run when their own
-# directory changes, so a commit touching one copy and not the other would
-# otherwise sail through green -- which is exactly the failure this risks.
+#  3. A shared/ directory nothing references. Harmless, but it is dead weight
+#     that will rot, and it usually means a mod was deleted or renamed.
 #
-# The set of shared files is derived from the tree rather than listed here. A
-# hardcoded list is one more thing that drifts, and the repo's convention is that
-# the directory layout is the single source of truth.
+# It also keeps the older rule that two mods must not ship DIFFERENT content at
+# the same container path. DOCKER_MODS applies several overlays to one container
+# in order, so whichever is listed last silently wins and the other mod is
+# subtly broken with nothing in the log to say so.
 #
-# MODS_DIR can point elsewhere for testing.
+# This runs from repo.yml, which has no paths filter, so it fires on every push.
+# Everything here is derived from the tree and the Dockerfiles rather than from a
+# list kept somewhere, so it cannot drift from what the builds actually do.
+#
+# MODS_DIR and WF_DIR can point elsewhere for testing.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO}"
 
 MODS_DIR="${MODS_DIR:-mods}"
+WF_DIR="${WF_DIR:-.github/workflows}"
+SHARED_DIR="${SHARED_DIR:-shared}"
 rc=0
 
 err() { echo "::error::$*"; }
 
 # Parallel arrays and no `declare -A`: this has to run on macOS, which still
 # ships bash 3.2. Same constraint as ci/check-mod-workflows.sh.
-paths=()  # container path, i.e. everything below the mod's root/
-owners=() # mods/<app>/<mod> that ships it
+used=() # shared/<dir> entries that some mod copies
 
+for d in "${MODS_DIR}"/*/*/; do
+    [[ -f "${d}Dockerfile" ]] || continue
+    mod="$(basename "${d%/}")"
+    app="$(basename "$(dirname "${d%/}")")"
+    id="${app}-${mod}"
+    wf="${WF_DIR}/mod-${id}.yml"
+
+    while IFS= read -r dep; do
+        [[ -z ${dep} ]] && continue
+        used+=("${dep}")
+
+        if [[ ! -d ${dep} ]]; then
+            err "${d}Dockerfile copies ${dep}, which does not exist."
+            rc=1
+            continue
+        fi
+
+        # THE important one. Without this filter, editing the shared code changes
+        # this mod's image and nothing tests or rebuilds it.
+        if [[ -f ${wf} ]] && ! grep -qF "'${dep}/**'" "${wf}"; then
+            err "${wf} has no paths filter for '${dep}/**', but ${d}Dockerfile copies it."
+            echo "       a change to ${dep} would alter ${id}'s image without running its CI."
+            echo "       add this next to the mods/${app}/${mod}/** entry, under BOTH push and pull_request:"
+            echo "         - '${dep}/**'"
+            rc=1
+        fi
+    done < <(ci/mod-inputs.sh "${MODS_DIR}/${app}/${mod}" | grep -v "^${MODS_DIR}/")
+done
+
+# Orphans: a shared directory nothing copies.
+if [[ -d ${SHARED_DIR} ]]; then
+    for s in "${SHARED_DIR}"/*/; do
+        [[ -d ${s} ]] || continue
+        name="${s%/}"
+        found=0
+        for u in "${used[@]:-}"; do
+            [[ ${u} == "${name}" ]] && found=1 && break
+        done
+        if ((!found)); then
+            err "${name} is not copied by any mod's Dockerfile."
+            echo "       either a mod should be using it, or it should be deleted."
+            rc=1
+        fi
+    done
+fi
+
+# Two mods must not ship different content at one container path.
+paths=()
+owners=()
 while IFS= read -r f; do
-    # mods/<app>/<mod>/root/<container path>
     rest="${f#"${MODS_DIR}"/}"
     app="${rest%%/*}"
     rest="${rest#*/}"
@@ -52,79 +103,39 @@ while IFS= read -r f; do
     [[ ${rest} == root/* ]] || continue
     paths+=("${rest#root/}")
     owners+=("${MODS_DIR}/${app}/${mod}")
-    # Symlinks count. `cmp` follows them, so a symlink drifting against a real
-    # file would otherwise be invisible to this check; the link-target comparison
-    # below is what actually catches it.
 done < <(find "${MODS_DIR}" -mindepth 4 -path "*/root/*" \( -type f -o -type l \) | sort)
 
-if ((${#paths[@]} == 0)); then
-    echo "**** no mod overlay files found under ${MODS_DIR}/ ****"
-    exit 0
-fi
-
-# Which container paths are shipped by more than one mod?
-shared=()
-while IFS= read -r p; do
-    [[ -n ${p} ]] && shared+=("${p}")
-done < <(printf '%s\n' "${paths[@]}" | sort | uniq -d)
-
-if ((${#shared[@]} == 0)); then
-    echo "**** no file is shipped by more than one mod; nothing to compare ****"
-    exit 0
-fi
-
-for p in "${shared[@]}"; do
-    # Collect every mod shipping this path, in discovery order. The first is the
-    # reference; the rest must match it.
-    ref=""
-    group=()
-    for i in "${!paths[@]}"; do
-        [[ ${paths[${i}]} == "${p}" ]] || continue
-        group+=("${owners[${i}]}")
-    done
-
-    ref="${group[0]}/root/${p}"
-    ok=1
-    for owner in "${group[@]:1}"; do
-        other="${owner}/root/${p}"
-        # A symlink and a regular file with identical contents are NOT the same
-        # overlay entry, and `cmp` cannot tell them apart because it follows the
-        # link. Compare link-ness and target before falling through to content.
-        if [[ -L ${ref} || -L ${other} ]]; then
-            if [[ $(readlink "${ref}" 2>/dev/null) != $(readlink "${other}" 2>/dev/null) ]]; then
-                err "/${p} is a symlink in one mod and not the other, or points somewhere else."
-                echo "       ${group[0]}: $(readlink "${ref}" 2>/dev/null || echo 'regular file')"
-                echo "       ${owner}: $(readlink "${other}" 2>/dev/null || echo 'regular file')"
-                ok=0
+if ((${#paths[@]})); then
+    while IFS= read -r p; do
+        [[ -z ${p} ]] && continue
+        group=()
+        for i in "${!paths[@]}"; do
+            [[ ${paths[${i}]} == "${p}" ]] || continue
+            group+=("${owners[${i}]}")
+        done
+        ref="${group[0]}/root/${p}"
+        for owner in "${group[@]:1}"; do
+            other="${owner}/root/${p}"
+            if [[ -L ${ref} || -L ${other} ]]; then
+                if [[ $(readlink "${ref}" 2>/dev/null) != $(readlink "${other}" 2>/dev/null) ]]; then
+                    err "/${p} is a symlink in one of ${group[0]} / ${owner} and not the other, or points elsewhere."
+                    rc=1
+                fi
+            elif ! cmp -s "${ref}" "${other}"; then
+                err "/${p} differs between ${group[0]} and ${owner}."
+                echo "       two mods applied to one container would fight over it; move it to ${SHARED_DIR}/ instead."
                 rc=1
-                continue
             fi
-        elif ! cmp -s "${ref}" "${other}"; then
-            err "/${p} differs between ${group[0]} and ${owner}."
-            echo "       these are one shared file duplicated per mod; edit every copy together."
-            echo "       fix with: cp '${ref}' '${other}'"
-            echo "       diff:"
-            diff -u "${ref}" "${other}" | sed -n '1,40p' | sed 's/^/         /' || true
-            ok=0
-            rc=1
-        fi
-        # Content is not the whole story: s6 ignores a run script that lost its
-        # executable bit, so a permission that differs between copies is drift too.
-        if { [[ -x ${ref} ]] && [[ ! -x ${other} ]]; } || { [[ ! -x ${ref} ]] && [[ -x ${other} ]]; }; then
-            err "/${p} has a different executable bit in ${group[0]} and ${owner}."
-            echo "       s6 silently ignores a service script that is not executable; keep the copies identical."
-            ok=0
-            rc=1
-        fi
-    done
-
-    if ((ok)); then
-        echo "  ok  /${p} -- identical across ${#group[@]} mods:"
-        printf '        %s\n' "${group[@]}"
-    fi
-done
+        done
+    done < <(printf '%s\n' "${paths[@]}" | sort | uniq -d)
+fi
 
 if ((rc == 0)); then
-    echo "**** ${#shared[@]} shared file(s), each byte-identical across every mod shipping it ****"
+    if ((${#used[@]})); then
+        echo "**** shared/ is consistent ****"
+        printf '%s\n' "${used[@]}" | sort -u | sed 's/^/  /'
+    else
+        echo "**** no mod uses shared/; nothing to check ****"
+    fi
 fi
 exit $rc

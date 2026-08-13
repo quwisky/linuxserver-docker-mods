@@ -103,8 +103,9 @@ truthy() { [[ ! ${1,,} =~ ^(0|false|no|off|disable|disabled)$ ]]; }
 is_uint() { [[ $1 =~ ^[0-9]+$ ]]; }
 
 #-------------------------------------------------------------------------------
-# The netns watchdog, sourced rather than inlined so it can be unit-tested and so
-# the two gluetun-portforward mods share one copy of it verbatim.
+# The netns watchdog. Sourced rather than inlined so it can be unit-tested, and
+# so every gluetun-portforward mod builds from ONE copy of it in shared/ rather
+# than a duplicate per mod.
 #
 # Sourced HERE, after log/loud/truthy/is_uint exist, so the helper binds to this
 # mod's real logging rather than to its own fallbacks -- but still before
@@ -120,7 +121,7 @@ is_uint() { [[ $1 =~ ^[0-9]+$ ]]; }
 NETNS_WATCHDOG_LIB="${GLUETUN_PF_NETNS_WATCHDOG_LIB:-/usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh}"
 if [[ -r ${NETNS_WATCHDOG_LIB} ]]; then
     # shellcheck source-path=SCRIPTDIR
-    # shellcheck source=../../../../usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh
+    # shellcheck source=../../../../../../../../shared/mod-gluetun-portforward/netns-watchdog.sh
     . "${NETNS_WATCHDOG_LIB}"
 fi
 # Defence in depth: a partial overlay must not break the poll loop.

@@ -630,13 +630,17 @@ shellcheck -x \
 find . \( -name run -o -name finish -o -name check \) -not -perm -0111 -print
 ```
 
-`root/usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh` is duplicated
-byte-for-byte in every gluetun-portforward mod — a mod is a single-layer image
-built from its own directory, so there is nowhere shared to put it.
-`ci/check-shared-files.sh` fails the build if the copies drift, and it runs from
-the repo-wide workflow rather than a per-mod one precisely because a commit
-touching only one copy would not trigger the other mod's CI. Edit every copy
-together.
+The netns watchdog lives once, in `shared/mod-gluetun-portforward/`, rather
+than being copied into each mod. A mod is still a single-layer image, so the
+Dockerfile assembles `root/` and the shared directory in a `FROM scratch`
+*assembly* stage and the final stage takes the result in one `COPY --from`.
+The build context is the repo root, which is what makes `shared/` reachable.
+
+Two consequences worth knowing: editing that file changes every
+gluetun-portforward mod's image at once, and this mod's workflow therefore
+carries a `paths:` filter for `shared/mod-gluetun-portforward/**` so a change
+there actually runs its tests. `ci/check-shared-files.sh` fails the build if
+that filter goes missing.
 
 ## Credits
 

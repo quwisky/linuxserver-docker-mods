@@ -59,13 +59,31 @@ numbered. See [Release channels](README.md#release-channels).
   Picking this up needs `docker compose up -d --force-recreate`, since a mod is
   only re-applied when a container is recreated, not restarted.
 
-- `ci/check-shared-files.sh` asserts that any file more than one mod overlays at
-  the same container path is byte-identical everywhere it ships. Mods are
-  independent single-layer images with no cross-mod include mechanism, so shared
-  logic has to be duplicated; this is what stops the copies rotting. It runs from
-  the repo-wide workflow, which has no paths filter, because a commit editing one
-  copy and not the other only touches one mod's directory and would otherwise
-  never trigger the other mod's CI.
+- A `shared/` directory for code more than one mod overlays, so the netns
+  watchdog exists once rather than as a copy per mod. Each mod's **build context
+  is now the repo root** instead of its own directory, which is what makes
+  `shared/` reachable; the single-layer rule is unchanged, because a mod that
+  needs two sources assembles them in a `FROM scratch` stage and the final stage
+  takes the result in one `COPY --from`. A mod that shares nothing keeps a single
+  plain `COPY`.
+
+  Two things had to follow, and both are enforced rather than documented:
+
+  - `ci/check-shared-files.sh` fails the build when a mod copies `shared/<name>`
+    without carrying `'shared/<name>/**'` in its workflow's `paths:` filter. Per-mod
+    workflows are gated on their own directory, so without that filter a change to
+    shared code would alter the mod's image without running its tests or its
+    build — the same silent failure as a mod having no workflow at all. It also
+    reports shared directories nothing uses, and still refuses to let two mods
+    ship different content at the same container path.
+  - `ci/mod-inputs.sh` derives the nightly content hash from the mod directory
+    *plus* every `shared/` directory its Dockerfile copies, reading the list from
+    the Dockerfile so it cannot drift. The old pin hashed the mod directory alone,
+    which would have made a shared-code change produce a different image under a
+    pin that already existed — and the nightly publish is deduped on exactly that,
+    so it would have been skipped silently, every night.
+
+  The per-mod `.dockerignore` files are gone, replaced by one at the repo root.
 
 ### Changed
 
