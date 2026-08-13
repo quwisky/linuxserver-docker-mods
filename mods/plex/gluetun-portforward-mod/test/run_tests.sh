@@ -49,7 +49,7 @@ fi
 # In a checkout the netns-watchdog helper still lives inside the mod's root/
 # overlay; the absolute path ./run defaults to only exists once the mod has been
 # applied to a container. Exported so the child shells clamp() spawns see it too.
-export NETNS_WATCHDOG_LIB="${HERE}/../root/usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh"
+export GLUETUN_PF_NETNS_WATCHDOG_LIB="${HERE}/../root/usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh"
 
 # Resolve the source path relative to this script rather than the caller's cwd,
 # so `shellcheck -x` can follow it and see which globals ./run consumes.
@@ -282,6 +282,20 @@ has() { # has <name> <expected-rc> <iface...>
     eq "${name}" "${want}" "$?"
 }
 
+unreadable() { # unreadable <name> <expected-rc> -- a dir we cannot enumerate
+    local d="${NETNS_TMP}/blind"
+    rm -rf "${d}"
+    mkdir -p "${d}"
+    : >"${d}/lo"
+    : >"${d}/eth0"
+    chmod 000 "${d}"
+    NETNS_SYSFS="${d}"
+    netns_has_network
+    local rc=$?
+    chmod 755 "${d}" # so the EXIT trap can clean up
+    eq "$1" "$2" "${rc}"
+}
+
 has 'lo only -> reports no network' 1 lo
 has 'lo + eth0 -> reports network' 0 lo eth0
 has 'lo + tun0 -> reports network' 0 lo tun0
@@ -294,6 +308,82 @@ has 'bonding_masters is not an interface' 1 lo bonding_masters
 NETNS_SYSFS="${NETNS_TMP}/no-such-dir"
 netns_has_network
 eq 'a missing sysfs is not evidence, so it reports network' 0 "$?"
+
+# "We could not look" must never be reported as "we looked and found nothing".
+#
+# Only meaningful as a non-root user: uid 0 bypasses the DAC check, so a mode-000
+# directory is still enumerable and the assertion would pass with or without the
+# -r/-x guard. Rather than let it stand as a vacuous pass, say so -- CI runs this
+# suite as an unprivileged user, where it does bite.
+if [[ $(id -u) -eq 0 ]]; then
+    printf '  skip an unenumerable sysfs reports network -- needs a non-root uid, this is 0\n'
+else
+    unreadable 'an unenumerable sysfs reports network rather than "no network"' 0
+fi
+
+#------------------------------------------------------------------------------
+section "netns watchdog: the halt itself"
+#------------------------------------------------------------------------------
+# Deliberately BEFORE the decision tests below, which replace
+# netns_watchdog_halt with a stub -- so this exercises the real function.
+#
+# It ends in exec, so each case runs in a subshell: the exec replaces the
+# subshell and this script carries on. NETNS_HALT_BIN, NETNS_EXITCODE_DIR and
+# NETNS_SERVICE_DIR point it at a sandbox instead of the real s6 paths, which is
+# the only reason they are variables rather than literals.
+# Exported for the same reason as NETNS_SYSFS: inputs to the sourced helper that
+# nothing in this file reads back, so shellcheck cannot see the use. The helper
+# assigns all three unconditionally when sourced, so exporting them here cannot
+# leak a sandbox path into the child shells clamp() spawns.
+export NETNS_EXITCODE_DIR NETNS_SERVICE_DIR NETNS_HALT_BIN NETNS_EXIT_CODE
+# Set out here rather than inside the subshell: assigning it in there and reading
+# it from the stub further down is what SC2030/SC2031 exist to warn about, and
+# they would be right to.
+NETNS_EXIT_CODE=70
+
+halt_case() { # halt_case <label> <halt-binary-present 0|1> -> prints its sandbox
+    local dir="${NETNS_TMP}/halt-$1"
+    rm -rf "${dir}"
+    mkdir -p "${dir}/bin"
+    printf '#!/bin/sh\necho "REAL-HALT ran"\n' >"${dir}/bin/halt"
+    printf '#!/bin/sh\necho "FALLBACK s6-svscanctl $*"\n' >"${dir}/bin/s6-svscanctl"
+    chmod +x "${dir}/bin/halt" "${dir}/bin/s6-svscanctl"
+    (
+        # Not pre-created: the halt is supposed to mkdir -p this itself.
+        NETNS_EXITCODE_DIR="${dir}/results"
+        NETNS_SERVICE_DIR="${dir}/service"
+        if (($2)); then
+            NETNS_HALT_BIN="${dir}/bin/halt"
+        else
+            NETNS_HALT_BIN="${dir}/bin/definitely-absent"
+        fi
+        PATH="${dir}/bin:${PATH}"
+        netns_watchdog_halt
+    ) >"${dir}/out" 2>&1
+    printf '%s' "${dir}"
+}
+
+hd="$(halt_case primary 1)"
+eq 'halt creates the results dir and writes the exit code' 70 "$(cat "${hd}/results/exitcode" 2>/dev/null)"
+if grep -q 'REAL-HALT ran' "${hd}/out"; then
+    ok 'halt execs the s6 halt binary'
+else
+    no 'halt execs the s6 halt binary' 'REAL-HALT ran' "$(cat "${hd}/out")"
+fi
+
+hd="$(halt_case fallback 0)"
+eq 'the fallback still writes the exit code first' 70 "$(cat "${hd}/results/exitcode" 2>/dev/null)"
+if grep -q 'FALLBACK s6-svscanctl -t' "${hd}/out"; then
+    ok 'falls back to s6-svscanctl when the halt binary is absent'
+else
+    no 'falls back to s6-svscanctl when the halt binary is absent' \
+        'FALLBACK s6-svscanctl -t <dir>' "$(cat "${hd}/out")"
+fi
+if grep -q 'is absent; falling back' "${hd}/out"; then
+    ok 'and says why it fell back'
+else
+    no 'and says why it fell back' 'a "falling back" line' "$(cat "${hd}/out")"
+fi
 
 #------------------------------------------------------------------------------
 section "netns watchdog: the halt decision"
@@ -321,7 +411,13 @@ wd() { # wd <GLUETUN_PF_NETNS_* assignments...> -- configure a fresh watchdog
 
 # THE regression that matters. Everyone already pulling :latest has this flag
 # unset, and for them the watchdog must be inert -- no strikes, no halt, nothing.
-wd
+#
+# GRACE=0 is load-bearing, not incidental. With the default 60s grace and a
+# SECONDS of ~0 this early in the run, check() returns at the GRACE branch and
+# never reaches the enabled guard -- so the assertions below would pass even if
+# that guard were deleted. Pinning the grace off leaves the guard as the only
+# thing that can suppress the check, which is what these two lines are for.
+wd GLUETUN_PF_NETNS_WATCHDOG_GRACE=0
 NETNS_SYSFS="$(mknet dead lo)"
 for _ in 1 2 3 4 5 6 7 8; do netns_watchdog_check; done
 eq 'flag unset: never halts, even in a dead namespace' 0 "${HALTED}"
@@ -333,7 +429,9 @@ else
 fi
 
 for v in false 0 no off disabled; do
-    wd "GLUETUN_PF_NETNS_WATCHDOG=${v}"
+    # GRACE=0 for the same reason as above: without it the grace branch, not the
+    # falsey value, is what keeps these quiet.
+    wd "GLUETUN_PF_NETNS_WATCHDOG=${v}" GLUETUN_PF_NETNS_WATCHDOG_GRACE=0
     NETNS_SYSFS="$(mknet dead lo)"
     netns_watchdog_check
     netns_watchdog_check
@@ -431,7 +529,7 @@ section "netns watchdog: ./run survives the helper being absent"
 # the helper cannot be sourced, so the mod behaves exactly as it did before this
 # feature existed -- even with the flag explicitly turned on.
 absent="$(
-    NETNS_WATCHDOG_LIB=/nonexistent/netns-watchdog.sh \
+    GLUETUN_PF_NETNS_WATCHDOG_LIB=/nonexistent/netns-watchdog.sh \
         GLUETUN_PF_NETNS_WATCHDOG=true \
         bash -c '
             GLUETUN_PF_LIB_ONLY=1 source "$1"

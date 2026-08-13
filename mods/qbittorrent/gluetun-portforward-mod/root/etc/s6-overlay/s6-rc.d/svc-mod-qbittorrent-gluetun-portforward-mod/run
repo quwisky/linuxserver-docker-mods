@@ -101,7 +101,10 @@ is_uint() { [[ $1 =~ ^[0-9]+$ ]]; }
 # stubs below make netns_watchdog_check a no-op and this file behaves exactly as
 # it did before the feature existed.
 #-------------------------------------------------------------------------------
-NETNS_WATCHDOG_LIB="${NETNS_WATCHDOG_LIB:-/usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh}"
+# Overridable only through the mod's own prefix: this script runs under
+# with-contenv, so every container variable is in scope, and an unprefixed name
+# here would mean an unrelated variable could decide which file we source as root.
+NETNS_WATCHDOG_LIB="${GLUETUN_PF_NETNS_WATCHDOG_LIB:-/usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh}"
 if [[ -r ${NETNS_WATCHDOG_LIB} ]]; then
     # shellcheck source-path=SCRIPTDIR
     # shellcheck source=../../../../usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh

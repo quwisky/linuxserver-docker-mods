@@ -46,8 +46,10 @@
 #
 #   * Off unless GLUETUN_PF_NETNS_WATCHDOG is explicitly set truthy. Everything
 #     below is inert until then, and netns_watchdog_check() returns immediately.
-#   * A missing or unreadable /sys/class/net reports "network present". A
-#     container without /sys mounted must never be halted on that basis.
+#   * A missing, unreadable or untraversable /sys/class/net reports "network
+#     present". A container without /sys mounted, or one whose service user
+#     cannot read it, must never be halted on that basis -- "we could not look"
+#     is not the same answer as "we looked and there was nothing there".
 #   * A grace period after service start, because the namespace is still being
 #     set up early in container start.
 #   * N consecutive failed checks, not one.
@@ -84,10 +86,23 @@ NETNS_DRY_RUN=0
 NETNS_STRIKES_MAX=4
 NETNS_GRACE=60
 NETNS_EXIT_CODE=70
-NETNS_SYSFS="${NETNS_SYSFS:-/sys/class/net}"
 NETNS_STRIKES=0         # consecutive failed checks; survives across poll iterations
 NETNS_GRACE_LOGGED=0
 NETNS_DRY_RUN_ANNOUNCED=0
+
+# Where the interface scan looks. Assignable by the unit tests, and settable from
+# the environment ONLY through the mod's own GLUETUN_PF_ prefix -- these scripts
+# run under with-contenv, so every container variable is in scope and a bare
+# NETNS_SYSFS would be one collision away from redirecting a safety-critical scan.
+NETNS_SYSFS="${GLUETUN_PF_NETNS_SYSFS:-/sys/class/net}"
+
+# The s6 paths the halt needs. Deliberately plain variables with no environment
+# fallback: they exist so the tests can point the halt at a sandbox, and nothing
+# outside this file should ever be able to redirect where the container is told
+# to shut down from.
+NETNS_EXITCODE_DIR=/run/s6-linux-init-container-results
+NETNS_HALT_BIN=/run/s6/basedir/bin/halt
+NETNS_SERVICE_DIR=/run/service
 
 #-------------------------------------------------------------------------------
 # netns_watchdog_configure(): env -> globals. Called from the mod's configure(),
@@ -97,7 +112,7 @@ NETNS_DRY_RUN_ANNOUNCED=0
 # someone typed "60s" is the wrong call for a background mod.
 #-------------------------------------------------------------------------------
 netns_watchdog_configure() {
-    NETNS_SYSFS="${NETNS_SYSFS:-/sys/class/net}"
+    NETNS_SYSFS="${GLUETUN_PF_NETNS_SYSFS:-/sys/class/net}"
     NETNS_STRIKES=0
     NETNS_GRACE_LOGGED=0
     NETNS_DRY_RUN_ANNOUNCED=0
@@ -147,13 +162,19 @@ netns_watchdog_enabled() { ((NETNS_WATCHDOG)); }
 # Pure bash: a glob over the sysfs directory, no external command. Prints
 # nothing and sets no state, so it is safe to call from anywhere.
 #
-# A missing directory returns 0 (network present). Absence of evidence is not
-# evidence of a dead namespace, and this is the one branch where guessing wrong
-# stops someone's container.
+# A directory we cannot enumerate returns 0 (network present). Absence of
+# evidence is not evidence of a dead namespace, and this is the one branch where
+# guessing wrong stops someone's container.
+#
+# -r and -x are not belt-and-braces on top of -d. Without them a present but
+# unreadable directory passes -d, the glob below then silently fails to expand,
+# and the function reports "no network" -- the fail-DANGEROUS answer. Root does
+# not notice (it bypasses the permission check), so this only bites under
+# LSIO_NON_ROOT_USER, which is exactly the sort of asymmetry that ships.
 #-------------------------------------------------------------------------------
 netns_has_network() {
     local sysfs="${NETNS_SYSFS:-/sys/class/net}" entry name
-    [[ -d ${sysfs} ]] || return 0
+    [[ -d ${sysfs} && -r ${sysfs} && -x ${sysfs} ]] || return 0
 
     for entry in "${sysfs}"/*; do
         # No nullglob here (setting shell options in a sourced helper would leak
@@ -194,16 +215,16 @@ netns_watchdog_halt() {
     log "  -> docker refuses to start a container whose 'network_mode: service:' target is down, so while gluetun is"
     log "     still starting the restart retries with backoff. That is correct -- it cannot leak while stopped."
 
-    mkdir -p /run/s6-linux-init-container-results 2>/dev/null
-    if ! echo "${NETNS_EXIT_CODE}" >/run/s6-linux-init-container-results/exitcode 2>/dev/null; then
+    mkdir -p "${NETNS_EXITCODE_DIR}" 2>/dev/null
+    if ! echo "${NETNS_EXIT_CODE}" >"${NETNS_EXITCODE_DIR}/exitcode" 2>/dev/null; then
         log "could not write the exit code; the container will still halt, with s6's own status"
     fi
 
-    if [[ -x /run/s6/basedir/bin/halt ]]; then
-        exec /run/s6/basedir/bin/halt
+    if [[ -x ${NETNS_HALT_BIN} ]]; then
+        exec "${NETNS_HALT_BIN}"
     fi
-    loud "/run/s6/basedir/bin/halt is absent; falling back to s6-svscanctl"
-    exec s6-svscanctl -t /run/service
+    loud "${NETNS_HALT_BIN} is absent; falling back to s6-svscanctl"
+    exec s6-svscanctl -t "${NETNS_SERVICE_DIR}"
 }
 
 #-------------------------------------------------------------------------------

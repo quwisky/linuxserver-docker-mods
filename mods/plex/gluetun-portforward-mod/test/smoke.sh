@@ -285,7 +285,7 @@ say "Scenario 12: the netns watchdog is off unless it is asked for"
 # The whole safety promise of the feature: someone already pulling :latest must
 # see byte-identical behaviour until they set the flag.
 run_scenario pfsmoke/caddyfile-gluetun-ok pfsmoke/caddyfile-plex 12 \
-    NETNS_SYSFS=/dead-netns
+    GLUETUN_PF_NETNS_SYSFS=/dead-netns
 refute "$MODLOG" 'says nothing about a watchdog' 'netns watchdog'
 refute "$MODLOG" 'does not report a strike' 'stranded in a dead network namespace'
 expect "$MODLOG" 'and still does its actual job' 'Plex public port is now 54321'
@@ -301,7 +301,7 @@ say "Scenario 12b: dry run reaches the decision and refuses to act on it"
 # The halt itself replaces PID 1 of a real s6 container and cannot be reached
 # from here, which is exactly why the dry-run flag exists.
 run_scenario pfsmoke/caddyfile-gluetun-ok pfsmoke/caddyfile-plex 16 \
-    NETNS_SYSFS=/dead-netns \
+    GLUETUN_PF_NETNS_SYSFS=/dead-netns \
     GLUETUN_PF_NETNS_WATCHDOG=true GLUETUN_PF_NETNS_WATCHDOG_DRY_RUN=true \
     GLUETUN_PF_NETNS_WATCHDOG_GRACE=0 GLUETUN_PF_NETNS_WATCHDOG_STRIKES=2
 dump "$MODLOG"

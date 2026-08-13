@@ -52,7 +52,10 @@ while IFS= read -r f; do
     [[ ${rest} == root/* ]] || continue
     paths+=("${rest#root/}")
     owners+=("${MODS_DIR}/${app}/${mod}")
-done < <(find "${MODS_DIR}" -mindepth 4 -path "*/root/*" -type f | sort)
+    # Symlinks count. `cmp` follows them, so a symlink drifting against a real
+    # file would otherwise be invisible to this check; the link-target comparison
+    # below is what actually catches it.
+done < <(find "${MODS_DIR}" -mindepth 4 -path "*/root/*" \( -type f -o -type l \) | sort)
 
 if ((${#paths[@]} == 0)); then
     echo "**** no mod overlay files found under ${MODS_DIR}/ ****"
@@ -84,7 +87,19 @@ for p in "${shared[@]}"; do
     ok=1
     for owner in "${group[@]:1}"; do
         other="${owner}/root/${p}"
-        if ! cmp -s "${ref}" "${other}"; then
+        # A symlink and a regular file with identical contents are NOT the same
+        # overlay entry, and `cmp` cannot tell them apart because it follows the
+        # link. Compare link-ness and target before falling through to content.
+        if [[ -L ${ref} || -L ${other} ]]; then
+            if [[ $(readlink "${ref}" 2>/dev/null) != $(readlink "${other}" 2>/dev/null) ]]; then
+                err "/${p} is a symlink in one mod and not the other, or points somewhere else."
+                echo "       ${group[0]}: $(readlink "${ref}" 2>/dev/null || echo 'regular file')"
+                echo "       ${owner}: $(readlink "${other}" 2>/dev/null || echo 'regular file')"
+                ok=0
+                rc=1
+                continue
+            fi
+        elif ! cmp -s "${ref}" "${other}"; then
             err "/${p} differs between ${group[0]} and ${owner}."
             echo "       these are one shared file duplicated per mod; edit every copy together."
             echo "       fix with: cp '${ref}' '${other}'"
