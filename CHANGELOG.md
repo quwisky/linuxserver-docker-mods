@@ -17,6 +17,46 @@ numbered. See [Release channels](README.md#release-channels).
 
 ## [Unreleased]
 
+### Added
+
+- **plex-gluetun-portforward-mod**, **qbittorrent-gluetun-portforward-mod** — an
+  opt-in watchdog that can **halt its own container**, to recover from a gluetun
+  restart. **Off by default**: nothing changes until
+  `GLUETUN_PF_NETNS_WATCHDOG=true` is set, and containers already pulling
+  `:latest` behave byte-identically until then.
+
+  `network_mode: service:gluetun` joins gluetun's network namespace by container
+  ID. When gluetun *restarts* — not merely reconnects — that namespace is
+  destroyed, and Docker never re-attaches the app container. It is left stranded
+  with only `lo`: up, healthy-looking, unreachable, and unable to route out until
+  something restarts it. The watchdog detects this from the inside and exits
+  PID 1 so the restart policy brings the container back attached correctly.
+
+  The signal is the absence of any non-loopback interface in `/sys/class/net`,
+  which is what makes it safe to act on: a VPN reconnect tears down `tun0` but
+  leaves `eth0`, so a reconnect cannot be mistaken for an orphaning. Reachability
+  of gluetun's control server is deliberately not used, since it cannot tell the
+  two apart. The scan is pure bash against `/sys` — no new packages.
+
+  `restart: unless-stopped` (or `on-failure`) is required; halting is only half
+  the mechanism. The halt is graceful, so s6 runs the shutdown sequence and the
+  application closes its files properly — qBittorrent writes its fastresume data,
+  Plex closes its library database — which is the advantage over an external
+  `docker kill`. Tunable via `_STRIKES`, `_GRACE`, `_EXIT_CODE`, and a `_DRY_RUN`
+  that logs the decision without acting on it. Both mods use the same variable
+  names, so running both behind one gluetun means one set of values.
+
+  Picking this up needs `docker compose up -d --force-recreate`, since a mod is
+  only re-applied when a container is recreated, not restarted.
+
+- `ci/check-shared-files.sh` asserts that any file more than one mod overlays at
+  the same container path is byte-identical everywhere it ships. Mods are
+  independent single-layer images with no cross-mod include mechanism, so shared
+  logic has to be duplicated; this is what stops the copies rotting. It runs from
+  the repo-wide workflow, which has no paths filter, because a commit editing one
+  copy and not the other only touches one mod's directory and would otherwise
+  never trigger the other mod's CI.
+
 ### Changed
 
 - All GitHub Actions bumped to majors that declare Node 24, since the runners

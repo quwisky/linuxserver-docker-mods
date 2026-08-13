@@ -97,6 +97,31 @@ falsey() { [[ ${1,,} =~ ^(0|false|no|off|disable|disabled)$ ]]; }
 truthy() { [[ ! ${1,,} =~ ^(0|false|no|off|disable|disabled)$ ]]; }
 is_uint() { [[ $1 =~ ^[0-9]+$ ]]; }
 
+#-------------------------------------------------------------------------------
+# The netns watchdog, sourced rather than inlined so it can be unit-tested and so
+# the two gluetun-portforward mods share one copy of it verbatim.
+#
+# Sourced HERE, after log/loud/truthy/is_uint exist, so the helper binds to this
+# mod's real logging rather than to its own fallbacks -- but still before
+# configure(), which is what arms it.
+#
+# Default off. Absent the helper, or with GLUETUN_PF_NETNS_WATCHDOG unset, the
+# stubs below make netns_watchdog_check a no-op and this file behaves exactly as
+# it did before the feature existed.
+#-------------------------------------------------------------------------------
+NETNS_WATCHDOG_LIB="${NETNS_WATCHDOG_LIB:-/usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh}"
+if [[ -r ${NETNS_WATCHDOG_LIB} ]]; then
+    # shellcheck source-path=SCRIPTDIR
+    # shellcheck source=../../../../usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh
+    . "${NETNS_WATCHDOG_LIB}"
+fi
+# Defence in depth: a partial overlay must not break the poll loop.
+if ! declare -F netns_watchdog_check >/dev/null 2>&1; then
+    netns_watchdog_configure() { NETNS_WATCHDOG=0; }
+    netns_watchdog_enabled() { return 1; }
+    netns_watchdog_check() { return 0; }
+fi
+
 curl_hint() {
     case ${1} in
         0) echo "no error" ;;
@@ -171,6 +196,8 @@ configure() {
         loud "GLUETUN_PF_PLEX_URL points at ${PLEX_URL} but GLUETUN_PF_PLEX_TOKEN is unset"
         log "  -> the token will be read from THIS container's Preferences.xml, which is very likely the wrong server"
     fi
+
+    netns_watchdog_configure
 }
 
 #-------------------------------------------------------------------------------
@@ -617,10 +644,23 @@ main() {
     # inside the tunnel fails whether or not the rule is there. So we warn.
     log "reminder: gluetun needs VPN_PORT_FORWARDING=on AND VPN_PORT_FORWARDING_LISTENING_PORT=32400"
     log "  (VPN_PORT_FORWARDING_LISTENING_PORTS on gluetun master) or nothing will actually reach Plex on the forwarded port"
+    if netns_watchdog_enabled; then
+        if ((NETNS_DRY_RUN)); then
+            log "netns watchdog         : DRY RUN, ${NETNS_STRIKES_MAX} strikes, ${NETNS_GRACE}s grace (logs the decision, halts nothing)"
+        else
+            log "netns watchdog         : armed, ${NETNS_STRIKES_MAX} strikes, ${NETNS_GRACE}s grace, halts with exit ${NETNS_EXIT_CODE}"
+            log "  -> needs 'restart: unless-stopped' on this container, or halting it is not a recovery"
+        fi
+    fi
 
     local unreachable_streak=0
 
     while ((!TERMINATE)); do
+        # FIRST, before any request. Once the namespace is dead every port-sync
+        # attempt fails anyway, so checking later would bury the diagnosis under
+        # a wall of connection errors. Off by default; never returns if it halts.
+        netns_watchdog_check
+
         if ! plex_up; then
             state plex down && loud "waiting for Plex to answer on ${PLEX_URL} ($(curl_hint "${HTTP_RC}"))"
             _sleep "${RETRY_INTERVAL}"
