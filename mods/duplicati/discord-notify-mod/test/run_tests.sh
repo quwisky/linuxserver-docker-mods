@@ -21,7 +21,9 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MOD="${HERE}/../root/usr/local/bin/duplicati-discord.sh"
+# MOD_SCRIPT, not MOD: sourcing the script overwrites MOD with its own
+# short name, so a path kept there would be silently empty afterwards.
+MOD_SCRIPT="${HERE}/../root/usr/local/bin/duplicati-discord.sh"
 FIX="${HERE}/fixtures"
 
 if [[ ${NO_JQ:-0} == 1 ]]; then MODE="no-jq"; else MODE="with-jq"; fi
@@ -37,7 +39,7 @@ trap 'rm -rf "${TMP}"' EXIT
 
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=../root/usr/local/bin/duplicati-discord.sh
-DISCORD_LIB_ONLY=1 source "${MOD}"
+DISCORD_LIB_ONLY=1 source "${MOD_SCRIPT}"
 
 configure
 
@@ -269,6 +271,7 @@ BASE_ENV=(
 )
 
 PAYLOAD=""
+STDOUT=""
 STDERR=""
 SLEPT=""
 ARGV=""
@@ -335,6 +338,7 @@ capture() {
     ) >"${work}/out" 2>"${work}/err"
     RC=$?
     PAYLOAD="$(cat "${work}/payload" 2>/dev/null)"
+    STDOUT="$(cat "${work}/out" 2>/dev/null)"
     STDERR="$(cat "${work}/err" 2>/dev/null)"
     SLEPT="$(cat "${work}/slept" 2>/dev/null)"
     ARGV="$(cat "${work}/argv" 2>/dev/null)"
@@ -524,7 +528,7 @@ capture \
     DUPLICATI__PARSED_RESULT=Success \
     "DUPLICATI__RESULTFILE=${FIX}/success.json"
 eq 'no webhook configured: sends nothing' '' "${PAYLOAD}"
-eq 'and says nothing about it'            '' "${STDERR}"
+eq 'and says nothing about it'            '' "${STDOUT}${STDERR}"
 eq 'and still exits 0'                    0  "${RC}"
 
 #------------------------------------------------------------------------------
@@ -612,14 +616,16 @@ capture "${BASE_ENV[@]}" \
     "DUPLICATI__RESULTFILE=${FIX}/success.json" \
     CURL_CODES=404
 eq 'a 404 exits 0 -- a dead webhook is not a failed backup' 0 "${RC}"
-has 'and explains what a 404 means' "${STDERR}" 'the webhook URL is wrong'
+has 'and explains what a 404 means' "${STDOUT}" 'the webhook URL is wrong'
+eq 'and says it on stdout, so Duplicati does not warn' '' "${STDERR}"
 
 capture "${BASE_ENV[@]}" \
     DUPLICATI__PARSED_RESULT=Success \
     "DUPLICATI__RESULTFILE=${FIX}/success.json" \
     CURL_RC=28
 eq 'a curl timeout exits 0 as well' 0 "${RC}"
-has 'and says curl failed'          "${STDERR}" 'curl failed (exit 28)'
+has 'and says curl failed'          "${STDOUT}" 'curl failed (exit 28)'
+eq 'and curl said nothing on stderr either' '' "${STDERR}"
 
 # THE regression that matters most. Whatever is thrown at this script, Duplicati
 # must see a zero exit -- anything else and a working backup gets recorded as
@@ -718,8 +724,9 @@ warned() { # warned <VAR=VAL...> -> whatever configure() wrote to stderr
             export "${1?}"
             shift
         done
-        # stderr only: the warnings are what is under test, not the config dump.
-        { configure >/dev/null; } 2>&1
+        # configure() reports on stdout, like the rest of the script: Duplicati
+        # raises a warning against the backup for anything on stderr.
+        configure 2>/dev/null
     )
 }
 has 'a misspelled DISCORD_NOTIFY_ON is named' \
@@ -838,8 +845,8 @@ yes_ 'test: severity and operation filters do not suppress it' test -n "${PAYLOA
 capture_test DISCORD_HOSTNAME=tank
 eq 'test: no webhook sends nothing'  '' "${PAYLOAD}"
 eq 'test: and still exits 0'          0 "${RC}"
-has 'test: but complains, unlike the per-backup path' "${STDERR}" 'no webhook is configured'
-has 'test: and names all three sources' "${STDERR}" 'DISCORD_WEBHOOK_URL_FILE'
+has 'test: but complains, unlike the per-backup path' "${STDOUT}" 'no webhook is configured'
+has 'test: and names all three sources' "${STDOUT}" 'DISCORD_WEBHOOK_URL_FILE'
 
 # A dead webhook cannot fail the oneshot, which would block container startup.
 capture_test "DISCORD_WEBHOOK_URL=${WEBHOOK_STUB}" CURL_CODES=404
@@ -856,6 +863,64 @@ if [[ ${MODE} == "with-jq" ]] && have_jq; then
         "$(jq_get "${PAYLOAD}" '.embeds[0].color')"
     yes_ 'and still carries its statistics' test \
         "$(jq_get "${PAYLOAD}" '.embeds[0].fields | length')" -gt 5
+fi
+
+#------------------------------------------------------------------------------
+section "the two ways this mod shipped broken"
+#------------------------------------------------------------------------------
+# Both were found in production, by a warning in someone's Duplicati log:
+#
+#   [Warning-...RunScript-StdErrorNotEmpty]: The script "..." reported error
+#   messages: [mod-discord-notify] [debug] event is '', not AFTER; nothing to do
+#
+# One line, two bugs. Neither was reachable from the suite as it stood: sourcing
+# the script never runs its shebang, and smoke's with-contenv stand-in was
+# `exec "$@"`, which preserves the environment that the real one replaces.
+
+# 1. THE SHEBANG. with-contenv replaces the environment with the container's,
+# discarding everything Duplicati exported -- so every DUPLICATI__ variable this
+# mod reads arrived empty and it never sent a single notification.
+shebang="$(head -1 "${MOD_SCRIPT}")"
+eq 'the notification script does NOT use with-contenv' '#!/usr/bin/env bash' "${shebang}"
+# The oneshots are the opposite case: no caller, so they need the container
+# environment injected. Their shebang must NOT change.
+for one in "${HERE}"/../root/etc/s6-overlay/s6-rc.d/init-mod-*/run; do
+    eq "$(basename "$(dirname "${one}")") keeps with-contenv" \
+        '#!/usr/bin/with-contenv bash' "$(head -1 "${one}")"
+done
+
+# 2. STDERR. Duplicati raises a warning against the operation for ANY stderr
+# output from a --run-script hook, so a webhook being down -- or DISCORD_DEBUG
+# being on -- decorated every backup with a warning it had not earned.
+quiet() { # quiet <name> <VAR=VAL...>
+    local name=$1
+    shift
+    capture "$@"
+    eq "${name}: nothing on stderr" '' "${STDERR}"
+}
+quiet 'a dead webhook' "${BASE_ENV[@]}" \
+    DUPLICATI__PARSED_RESULT=Success "DUPLICATI__RESULTFILE=${FIX}/success.json" \
+    CURL_CODES=404
+quiet 'a curl failure' "${BASE_ENV[@]}" \
+    DUPLICATI__PARSED_RESULT=Success "DUPLICATI__RESULTFILE=${FIX}/success.json" \
+    CURL_RC=6
+quiet 'debug output' "${BASE_ENV[@]}" \
+    DUPLICATI__PARSED_RESULT=Success "DUPLICATI__RESULTFILE=${FIX}/success.json" \
+    DISCORD_DEBUG=true
+quiet 'a filtered operation' "${BASE_ENV[@]}" \
+    DUPLICATI__OPERATIONNAME=Compact DUPLICATI__PARSED_RESULT=Success \
+    "DUPLICATI__RESULTFILE=${FIX}/success.json" DISCORD_DEBUG=true
+quiet 'a rate limit' "${BASE_ENV[@]}" \
+    DUPLICATI__PARSED_RESULT=Success "DUPLICATI__RESULTFILE=${FIX}/success.json" \
+    'CURL_CODES=429 429'
+# The startup test shares the same delivery path and the same rule.
+capture_test "DISCORD_WEBHOOK_URL=${WEBHOOK_STUB}" CURL_CODES=404
+eq 'the startup test is quiet on stderr too' '' "${STDERR}"
+# Belt and braces: no redirection to stderr anywhere in the script.
+if grep -qF '>&2' "${MOD_SCRIPT}"; then
+    no 'no >&2 remains in the notification script' 'none' "$(grep -nF '>&2' "${MOD_SCRIPT}")"
+else
+    ok 'no >&2 remains in the notification script'
 fi
 
 #------------------------------------------------------------------------------
