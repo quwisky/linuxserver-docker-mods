@@ -63,12 +63,42 @@ build_runner() {
     # than a re-implementation of what it is supposed to do.
     cp "${HERE}/../root/etc/s6-overlay/s6-rc.d/init-mod-duplicati-discord-notify-mod-test/run" \
         "${d}/test-oneshot.sh"
-    # /usr/bin/with-contenv exists only in an LSIO image, and both scripts here
-    # carry it as their shebang. The stand-in baked in below is what the real one
-    # reduces to once the container environment is already in place. Without it
-    # the init oneshot cannot exec the notification script at all -- and would
-    # still exit 0, so the scenario driving it would pass while testing nothing.
-    printf 'FROM bash:5\nRUN apk add --no-cache curl jq && printf "#!/bin/sh\\nexec \\"\\$@\\"\\n" >/usr/bin/with-contenv && chmod +x /usr/bin/with-contenv\nCOPY duplicati-discord.sh /usr/local/bin/duplicati-discord.sh\nCOPY test-oneshot.sh /test-oneshot.sh\nCOPY fixtures /fixtures\nRUN chmod +x /usr/local/bin/duplicati-discord.sh /test-oneshot.sh && ln -s /usr/local/bin/duplicati-discord.sh /duplicati-discord.sh\n' >"${d}/Dockerfile"
+    # /usr/bin/with-contenv exists only in an LSIO image, and the init oneshot
+    # carries it as its shebang.
+    #
+    # THE STAND-IN REPLACES THE ENVIRONMENT. That is what the real one does, and
+    # it is not a detail: an `exec "$@"` stand-in preserves the caller's
+    # variables, and that difference is exactly why eleven scenarios once passed
+    # against a notification script whose own with-contenv shebang wiped every
+    # DUPLICATI__ variable before its first line ran. A double that is wrong in
+    # the one way that matters is worse than no double at all.
+    # s6-overlay writes every container variable into this directory during
+    # init; with-contenv is what reads it back. The oneshot scenarios call this
+    # first so they exercise that path rather than side-stepping it.
+    cat >"${d}/populate-contenv" <<'PCE'
+#!/bin/sh
+mkdir -p /run/s6/container_environment
+env | while IFS='=' read -r k v; do
+    case "$k" in DISCORD_*|DUPLICATI__*) printf '%s' "$v" >"/run/s6/container_environment/$k" ;; esac
+done
+exec "$@"
+PCE
+    cat >"${d}/with-contenv" <<'WCE'
+#!/bin/sh
+# Stand-in for s6's with-contenv: start from an empty environment, load
+# /run/s6/container_environment into it, then exec. Deliberately NOT a
+# pass-through.
+exec env -i sh -c '
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    export PATH
+    for f in /run/s6/container_environment/*; do
+        [ -e "$f" ] || continue
+        export "$(basename "$f")=$(cat "$f")"
+    done
+    exec "$@"
+' _ "$@"
+WCE
+    printf 'FROM bash:5\nRUN apk add --no-cache curl jq\nCOPY with-contenv /usr/bin/with-contenv\nCOPY populate-contenv /usr/bin/populate-contenv\nCOPY duplicati-discord.sh /usr/local/bin/duplicati-discord.sh\nCOPY test-oneshot.sh /test-oneshot.sh\nCOPY fixtures /fixtures\nRUN chmod +x /usr/bin/with-contenv /usr/bin/populate-contenv /usr/local/bin/duplicati-discord.sh /test-oneshot.sh && ln -s /usr/local/bin/duplicati-discord.sh /duplicati-discord.sh\n' >"${d}/Dockerfile"
     ctx "${d}" | docker build -q -t "${RUNNER}" - >/dev/null
 }
 
@@ -124,8 +154,11 @@ run_mod() {
     local e
     for e in "$@"; do envs+=(-e "${e}"); done
     docker rm -f dup-mod >/dev/null 2>&1
+    # Executed, NOT `bash /duplicati-discord.sh` -- running it through bash
+    # bypasses the shebang, which is where the environment-wiping bug lived.
+    # Duplicati execs the path; so does this.
     docker run --name dup-mod --network "${NET}" "${envs[@]}" \
-        "${RUNNER}" bash /duplicati-discord.sh >"${WORK}/out" 2>"${WORK}/err"
+        "${RUNNER}" /usr/local/bin/duplicati-discord.sh >"${WORK}/out" 2>"${WORK}/err"
     MOD_RC=$?
     MODLOG="$(cat "${WORK}/out" "${WORK}/err" 2>/dev/null)"
 }
@@ -310,7 +343,7 @@ docker run --name dup-mod --network "${NET}" \
     -e DISCORD_TEST_ON_START=true \
     -e DISCORD_HOSTNAME=tank \
     -e "DISCORD_WEBHOOK_URL=http://discord-stub:8080/api/webhooks/1234567890/aTokenThatIsNotReal" \
-    "${RUNNER}" bash /test-oneshot.sh >"${WORK}/out" 2>"${WORK}/err"
+    "${RUNNER}" populate-contenv /test-oneshot.sh >"${WORK}/out" 2>"${WORK}/err"
 MOD_RC=$?
 MODLOG="$(cat "${WORK}/out" "${WORK}/err" 2>/dev/null)"
 BODY="$(bodies)"
@@ -336,7 +369,7 @@ run_oneshot() { # run_oneshot [DISCORD_TEST_ON_START value, or nothing]
     local -a e=(-e "DISCORD_WEBHOOK_URL=${HOOK}")
     (($#)) && e+=(-e "DISCORD_TEST_ON_START=$1")
     docker run --name dup-mod --network "${NET}" "${e[@]}" \
-        "${RUNNER}" bash /test-oneshot.sh >/dev/null 2>&1
+        "${RUNNER}" populate-contenv /test-oneshot.sh >/dev/null 2>&1
 }
 run_oneshot
 eq 'unset: sends nothing' 0 "$(request_count)"
@@ -354,8 +387,44 @@ docker rm -f dup-mod >/dev/null 2>&1
 docker run --name dup-mod --network "${NET}" \
     -e DISCORD_TEST_ON_START=true -e DISCORD_TIMEOUT=3 \
     -e "DISCORD_WEBHOOK_URL=http://discord-stub:8080/api/webhooks/1/x" \
-    "${RUNNER}" bash /test-oneshot.sh >/dev/null 2>&1
+    "${RUNNER}" populate-contenv /test-oneshot.sh >/dev/null 2>&1
 eq 'an unreachable webhook still exits 0' 0 "$?"
+
+#------------------------------------------------------------------------------
+say "Scenario 11: Duplicati's variables survive the shebang, and stderr stays empty"
+# The bug this exists for, reported from a real container:
+#
+#   [Warning-...RunScript-StdErrorNotEmpty]: The script "..." reported error
+#   messages: [mod-discord-notify] [debug] event is '', not AFTER; nothing to do
+#
+# Two failures in one line. with-contenv had wiped DUPLICATI__EVENTNAME, so the
+# mod never sent anything; and the debug line went to stderr, which Duplicati
+# turns into a warning against the backup.
+start_stub dupsmoke/discord-ok
+run_mod DUPLICATI__PARSED_RESULT=Success \
+    DUPLICATI__RESULTFILE=/fixtures/success.json \
+    'DUPLICATI__REMOTEURL=s3://bucket/path' \
+    DISCORD_DEBUG=true
+dump "${MODLOG}"
+eq 'the caller-set DUPLICATI__ variables reached the script' 1 "$(request_count)"
+refute "${MODLOG}" 'it never says the event was empty' "event is '', not AFTER"
+# stderr is the half that made Duplicati warn.
+eq 'nothing at all on stderr, even with debug on' 0 "$(wc -c <"${WORK}/err" | tr -d ' ')"
+yes_ 'while stdout carried the debug output' test -s "${WORK}/out"
+
+say "Scenario 11b: a failing send is still silent on stderr"
+start_stub dupsmoke/discord-404
+run_mod DUPLICATI__PARSED_RESULT=Success \
+    DUPLICATI__RESULTFILE=/fixtures/success.json \
+    'DUPLICATI__REMOTEURL=s3://bucket/path'
+eq 'a 404 puts nothing on stderr' 0 "$(wc -c <"${WORK}/err" | tr -d ' ')"
+expect "${MODLOG}" 'and still explains itself on stdout' 'webhook URL is wrong'
+docker rm -f dup-hook >/dev/null 2>&1
+run_mod DUPLICATI__PARSED_RESULT=Success \
+    DUPLICATI__RESULTFILE=/fixtures/success.json \
+    'DUPLICATI__REMOTEURL=s3://bucket/path' DISCORD_TIMEOUT=3
+eq 'nor does an unreachable host -- curl -sS writes there too' 0 "$(wc -c <"${WORK}/err" | tr -d ' ')"
+expect "${MODLOG}" 'and curl the failure is reported on stdout' 'curl failed'
 
 #------------------------------------------------------------------------------
 printf '\n'

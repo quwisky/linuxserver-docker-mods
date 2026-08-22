@@ -204,6 +204,24 @@ These are the failure modes that produce no error, just a mod that does nothing:
 - **`#!/command/with-contenv bash`.** LinuxServer replaces `/usr/bin/with-contenv`
   with its own UMASK-aware wrapper that then calls the `/command` one. Use
   `#!/usr/bin/with-contenv bash`, or lose `UMASK` support.
+- **`with-contenv` on a script the *application* invokes.** It REPLACES the
+  environment with the container's, so anything the caller exported is gone.
+  That is what you want for an s6 service, which has no caller — and fatal for
+  a hook like Duplicati's `--run-script-after`, which passes its entire payload
+  in environment variables. Measured in a real image:
+
+  ```
+  #!/usr/bin/env bash            DUPLICATI__EVENTNAME=AFTER
+  #!/usr/bin/with-contenv bash   DUPLICATI__EVENTNAME=
+  ```
+
+  Such a script needs a plain shebang. It still sees the container's own
+  variables, because the application was itself started under `with-contenv` and
+  children inherit.
+- **Writing to stderr from a script an application invokes.** Duplicati raises a
+  warning against the operation for any stderr output at all
+  (`RunScript-StdErrorNotEmpty`); other applications have their own version of
+  this. Use stdout unless you mean to be reported as a problem.
 - **`s6-setuidgid abc` without a guard.** Under `LSIO_NON_ROOT_USER` there is no
   `abc` user and it fails. Guard it, or avoid needing it.
 - **`apt-get`/`apk` called directly.** Append to

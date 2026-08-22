@@ -17,6 +17,27 @@ numbered. See [Release channels](README.md#release-channels).
 
 ## [Unreleased]
 
+### Fixed
+
+- **duplicati-discord-notify-mod sent nothing at all.** Its script carried
+  `#!/usr/bin/with-contenv bash`, and `with-contenv` *replaces* the environment
+  with the container's — discarding every `DUPLICATI__` variable Duplicati
+  exports, which is the entire input the mod reads. It saw an empty event name
+  on every operation and returned without sending. The script now uses a plain
+  shebang; it still receives the container's `DISCORD_` variables, because
+  Duplicati is itself started under `with-contenv` and children inherit.
+
+- **...and made every backup log a warning while doing it.** Duplicati raises
+  `RunScript-StdErrorNotEmpty` for any output a hook puts on stderr, so the
+  mod's own diagnostics — and anything `curl` printed — decorated the operation
+  with a warning it had not earned. All output now goes to stdout.
+
+  Both were reported from a running container, in one log line. Neither was
+  reachable from the test suite: sourcing the script never runs its shebang, and
+  the smoke harness's `with-contenv` stand-in passed the environment through
+  instead of replacing it. Both are now covered, and the stand-in was corrected
+  to behave like the real one.
+
 ### Changed
 
 - **`:nightly` is now published on every push to `develop`**, not only by the

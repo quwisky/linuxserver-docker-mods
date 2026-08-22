@@ -61,6 +61,22 @@ running as the same user. So the URL is handed to `curl` through `--config` on a
 pipe rather than as an argument, and the payload goes in on stdin. Neither ever
 appears in `ps`, and neither is written to disk.
 
+### It writes nothing to stderr, ever
+
+Duplicati raises a warning against the operation for **any** output a
+`--run-script` hook puts on stderr:
+
+```
+[Warning-...RunScript-StdErrorNotEmpty]: The script "..." reported error
+messages: ...
+```
+
+A warning is not a failure, but decorating every backup with one because a
+webhook was briefly unreachable is the same kind of harm. So everything this mod
+prints — including its failures, and including `DISCORD_DEBUG` output — goes to
+stdout, which Duplicati logs without complaint. `curl`'s own error output is
+captured and re-emitted there too.
+
 ### It can never fail your backup
 
 Duplicati treats a non-zero exit from `--run-script-after` as the operation
@@ -71,12 +87,13 @@ produce a message on stderr and a zero exit.
 
 ## Requirements
 
-- The `linuxserver/duplicati` image. The fixtures and the notification path are
-  built against Duplicati 2.2's result format; the start-up path is verified
-  against the 2.3 image. A real 2.3 backup has not been run end to end, which is
-  why the result-file lookup is recursive rather than a fixed path — Duplicati
-  has moved these fields between releases before, and the mod is built to
-  survive it rather than to assume a version.
+- The `linuxserver/duplicati` image. The fixtures are written against Duplicati
+  2.2's result format, and a real backup has been run end to end on the 2.3
+  image — every field the embed shows was populated from 2.3's own result JSON.
+  That the same fixtures and the same code cover both is the point of the
+  result-file lookup being recursive rather than a fixed path: Duplicati has
+  moved these fields between releases before, and the mod is built to survive it
+  rather than to assume a version.
 - **`SETTINGS_ENCRYPTION_KEY`**, at least 8 characters. Nothing to do with this
   mod: Duplicati 2.3 refuses to start without it, and the container never
   finishes initialising, so the mod never runs either.
@@ -286,6 +303,7 @@ not into `docker logs`, because Duplicati is what invokes it.
 | `Discord returned HTTP 429` | Rate limited. The mod retries once, honouring `retry_after`, then gives up until the next operation. Several jobs finishing at the same instant is the usual cause. |
 | `curl failed (exit 28)` | The request timed out. Raise `DISCORD_TIMEOUT`, or check the container's egress — `discord.com` has to be reachable. |
 | `curl failed (exit 6)` | DNS. Common when the container is on a VPN network namespace whose resolver is not up yet. |
+| `event is '', not AFTER` (with `DISCORD_DEBUG=true`) | The mod is not receiving Duplicati's variables at all. Fixed in this version: the script's shebang used to be `#!/usr/bin/with-contenv bash`, which **replaces** the environment and discarded every `DUPLICATI__` variable. If you still see it, the script on disk is stale — recreate the container so the mod re-applies. |
 | The message arrives, but with no file counts or sizes | `--run-script-result-output-format=Json` is not set. Without it the mod falls back to scanning Duplicati's plain-text result, which carries far less. |
 | The message is one flat block of text, not an embed | The `NO_JQ` fallback engaged: `jq` is not on `PATH`. It ships with `linuxserver/duplicati`, so this means either a stripped image or a failed package install — check the start-up log for `[pkg-install-init]` errors. Recreating the container re-runs the install. |
 | The message is missing rows you expected | Discord caps an embed at 6000 characters and 25 fields. A backup with a very long name or source list has its fields trimmed to fit; `DISCORD_DEBUG=true` reports how many were dropped. |

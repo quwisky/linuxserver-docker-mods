@@ -1,7 +1,29 @@
-#!/usr/bin/with-contenv bash
+#!/usr/bin/env bash
 # shellcheck shell=bash
 #===============================================================================
 # duplicati-discord-notify-mod
+#
+# NOT `#!/usr/bin/with-contenv bash`, and that is the one deviation from the
+# repo's rule for mod scripts. with-contenv REPLACES the environment with the
+# container's, discarding whatever the caller set -- which is correct for an s6
+# service, where there is no caller, and fatal here: every DUPLICATI__ variable
+# this script exists to read is set by Duplicati at exec time and would be wiped
+# before the first line ran. Measured in the real image:
+#
+#     #!/usr/bin/env bash              DUPLICATI__EVENTNAME=AFTER
+#     #!/usr/bin/with-contenv bash     DUPLICATI__EVENTNAME=
+#
+# The container's own DISCORD_ variables still arrive, because Duplicati is
+# started by s6 under with-contenv and children inherit its environment. So a
+# plain shebang gets both halves; with-contenv gets only one.
+#
+# `env bash` rather than /bin/bash: the LinuxServer image keeps bash at
+# /usr/bin/bash, and an Alpine-based image would keep it elsewhere again.
+#
+# Dropping with-contenv also drops LinuxServer's UMASK wrapper, which the repo
+# README warns about. It costs nothing here: the only files this script creates
+# are mktemp's, and mktemp is 0600 whatever the umask. If it ever writes a file
+# whose permissions matter, that trade has to be revisited.
 #
 # Invoked by Duplicati itself, once per operation, via
 #
@@ -92,12 +114,23 @@ MULTIBYTE=1     # ditto for truncate_text(); configure() probes it properly
 HAVE_JQ=0
 
 #-------------------------------------------------------------------------------
-# Logging. Everything this script prints ends up in Duplicati's own log, so it
-# stays quiet unless something went wrong or DISCORD_DEBUG asked for noise.
+# Logging. STDOUT, never stderr -- this is not a style preference.
+#
+# Duplicati treats ANY output on stderr from a --run-script hook as a problem and
+# raises a warning against the operation:
+#
+#     [Warning-...RunScript-StdErrorNotEmpty]: The script "..." reported error
+#     messages: ...
+#
+# So a webhook being unreachable, or DISCORD_DEBUG being on, would decorate every
+# backup with a warning -- which is the same class of harm as failing the backup,
+# and this mod's whole promise is that it cannot do that. Duplicati logs stdout
+# from the hook instead (its StdOutToLogs option), which is exactly where these
+# belong.
 #-------------------------------------------------------------------------------
-warn() { echo "${P} $*" >&2; }
+warn() { echo "${P} $*"; }
 dbg() {
-    [[ ${DEBUG,,} =~ ^(1|true|yes|on)$ ]] && echo "${P} [debug] $*" >&2
+    [[ ${DEBUG,,} =~ ^(1|true|yes|on)$ ]] && echo "${P} [debug] $*"
     return 0
 }
 
@@ -894,11 +927,16 @@ retry_after() {
 }
 
 deliver() {
-    local payload=$1 attempt=0 body code rc wait
+    local payload=$1 attempt=0 body cerr code rc wait
     body="$(mktemp_tracked)" || {
         warn "could not create a temporary file; not sending"
         return 1
     }
+    # curl -sS reports its own failures on stderr, and Duplicati raises a warning
+    # against the backup for anything that appears there. Captured and re-emitted
+    # on stdout below, so the diagnosis survives without costing the operation a
+    # warning it did not earn.
+    cerr="$(mktemp_tracked)" || cerr=/dev/null
 
     while :; do
         # Two things are kept out of the process table, for different reasons.
@@ -911,11 +949,12 @@ deliver() {
             -H 'Content-Type: application/json' \
             -o "${body}" -w '%{http_code}' \
             -X POST --data-binary @- \
-            --config <(printf 'url = "%s"\n' "${WEBHOOK}"))"
+            --config <(printf 'url = "%s"\n' "${WEBHOOK}") 2>"${cerr}")"
         rc=$?
 
         if ((rc != 0)); then
             warn "**** curl failed (exit ${rc}); the notification was not sent ****"
+            warn "  -> $(tr '\n' ' ' <"${cerr}" 2>/dev/null)"
             return 1
         fi
 
