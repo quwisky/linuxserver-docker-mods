@@ -366,9 +366,17 @@ jobs:
             # With dedupe off, the same git content can legitimately produce a
             # different image (a rebuild pulls a newer base), so a pin derived
             # only from git would be overwritten and stop being a pin.
-            # Date-stamp it so each rebuild gets its own immutable tag.
+            #
+            # The run id, not just the date. A date was enough while the only
+            # dedupe-off publish was one cron a night; now that any push to a
+            # channel branch publishes, two rebuilds of the same tree on the same
+            # day are ordinary -- a change to _mod-ci.yml does it, since that
+            # file is in every caller's paths filter -- and they would collide on
+            # one tag, silently overwriting the pin they promise not to.
             stamp=""
-            if [[ ${DEDUPE} != "true" ]]; then stamp="-$(date -u +%Y%m%d)"; fi
+            if [[ ${DEDUPE} != "true" ]]; then
+                stamp="-$(date -u +%Y%m%d)-${GITHUB_RUN_ID}"
+            fi
 
             if [[ ${CHANNEL} == nightly ]]; then
               # Content-addressed over everything the image is built FROM: this

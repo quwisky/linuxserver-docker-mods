@@ -39,6 +39,15 @@ on:
         required: false
         type: string
 
+# A publish moves a shared tag, so two runs for the same ref must not overlap:
+# push twice to develop a minute apart and both runs push :nightly, with the
+# older one free to land last. Serialised rather than cancelled -- killing a run
+# mid-push is how a manifest ends up half-written, and the queued run is the
+# newer commit anyway.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   packages: write
@@ -57,13 +66,20 @@ jobs:
       ref: ${{ github.event_name == 'schedule' && 'refs/heads/develop' || github.ref }}
       # develop publishes :nightly, master publishes :latest.
       channel: ${{ (github.event_name == 'schedule' || github.ref == 'refs/heads/develop') && 'nightly' || 'release' }}
-      # Publish on the nightly schedule, on a push to master, and on a manual
-      # run -- from master or develop for the channel tags, or from any branch
-      # at all when a custom tag is given. Pushes to develop and to feature
-      # branches, and all pull requests, test only.
+      # Publish from either channel branch: a push to master moves :latest, a
+      # push to develop moves :nightly, so develop is genuinely "the current
+      # develop" rather than "develop as of last night". The nightly schedule
+      # still runs, and still republishes only when the mod's content changed --
+      # the pin is content-addressed, so an unchanged tree is a no-op.
+      #
+      # A manual run publishes too: from master or develop for the channel tags,
+      # or from any branch at all when a custom tag is given. Pushes to feature
+      # branches and all pull requests test only.
       publish: >-
         ${{ github.event_name == 'schedule'
-            || (github.event_name == 'push' && github.ref == 'refs/heads/master')
+            || (github.event_name == 'push'
+                && (github.ref == 'refs/heads/master'
+                    || github.ref == 'refs/heads/develop'))
             || (github.event_name == 'workflow_dispatch'
                 && (inputs.tag != ''
                     || github.ref == 'refs/heads/master'
