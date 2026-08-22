@@ -19,6 +19,54 @@ numbered. See [Release channels](README.md#release-channels).
 
 ### Added
 
+- **duplicati-discord-notify-mod** — a new mod for `linuxserver/duplicati`,
+  published as `ghcr.io/quwisky/duplicati-discord-notify-mod`. Pulling it gets
+  you a colour-coded Discord embed after every Duplicati operation instead of
+  Duplicati's own choice of an email or a raw JSON POST — green for success,
+  amber for warnings, red for errors, a skull for fatal, with the backup name in
+  the title, the statistics as fields, and the actual error and warning lines
+  quoted in a fenced code block when there are any.
+
+  **The destination is sanitised before it is ever displayed.**
+  `DUPLICATI__REMOTEURL` carries the backend's credentials inline — S3 secret
+  keys, B2 application keys, OAuth ids, ssh passphrases — and Duplicati quotes
+  that URL back at you inside its own exception messages. A webhook message is a
+  permanent record in a chat history, so the query string and any userinfo are
+  stripped from the destination, and a second pattern-based pass covers every
+  log line the mod quotes, including credentials belonging to some other backend
+  that an inner exception happened to name. Both passes have tests, in the unit
+  suite and end to end against a stub that logs what actually crossed the wire.
+
+  Neither the webhook URL nor the payload ever reaches the process table: the
+  URL is handed to `curl` through `--config` on a pipe, the body on stdin. The
+  token in a webhook URL is the credential, and argv is readable from
+  `/proc/<pid>/cmdline` by anything running as the same user.
+
+  **It cannot fail your backup.** Duplicati treats a non-zero exit from
+  `--run-script-after` as the operation having failed, and says so everywhere
+  else you have notifications configured. The script therefore exits 0
+  unconditionally; a dead webhook, a 404, a rate limit and a DNS failure each
+  produce a line on stderr and nothing more. The smoke test asserts that against
+  all four.
+
+  Without `jq` it degrades rather than breaks: the payload becomes a flat
+  `content` message assembled by a pure-bash JSON encoder — no embed, no colour,
+  but valid JSON and still redacted. CI runs the whole unit suite a second time
+  with `jq` masked to keep that path honest.
+
+  **One manual step is still required, and no mod can remove it.** Duplicati
+  keeps its default options in `Duplicati-server.sqlite`, so
+  `--run-script-after=/usr/local/bin/duplicati-discord.sh` has to be added once
+  under **Settings → Default options** in the web UI. The mod prints the exact
+  line into the container log at every start.
+
+  Configuration is `DISCORD_WEBHOOK_URL` (or `_FILE`, or
+  `/config/discord-webhook.url`), plus filters for severity and operation and
+  an optional role mention on errors only; the mod's own README has the full
+  table. `DISCORD_TEST_ON_START=true` posts one message at container start, in
+  its own colour so it cannot be mistaken for a backup result, to prove the
+  webhook works without waiting for a backup to find out.
+
 - **A nightly documentation channel.** The site now publishes twice: the stable
   docs from `master` at the usual URL, describing the `:latest` images, and the
   nightly docs from `develop` under

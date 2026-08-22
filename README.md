@@ -16,6 +16,7 @@ the same content as these READMEs, rendered and searchable. ·
 
 | Mod | For | What it does |
 | --- | --- | --- |
+| [duplicati-discord-notify-mod](mods/duplicati/discord-notify-mod/) | `linuxserver/duplicati` | Posts a colour-coded Discord embed after every Duplicati operation, with the statistics, the destination and the errors Duplicati reported. |
 | [plex-gluetun-portforward-mod](mods/plex/gluetun-portforward-mod/) | `linuxserver/plex` | Keeps Plex's public remote-access port in sync with the port [gluetun](https://github.com/qdm12/gluetun) forwards. |
 | [plex-vaapi-amdgpu-mod](mods/plex/vaapi-amdgpu-mod/) | `linuxserver/plex` | Bundles modern Mesa and libva from Alpine edge so AMD GPUs, including RDNA4/gfx1151, can hardware transcode. `linux/amd64` only. |
 | [qbittorrent-gluetun-portforward-mod](mods/qbittorrent/gluetun-portforward-mod/) | `linuxserver/qbittorrent` | Keeps qBittorrent's listening port in sync with the port [gluetun](https://github.com/qdm12/gluetun) forwards, and re-applies it after an outage. |
@@ -209,6 +210,12 @@ These are the failure modes that produce no error, just a mod that does nothing:
   `/mod-repo-packages-to-install.list` and let the framework batch the install,
   then do dependent work in a second oneshot ordered after
   `init-mods-package-install`.
+- **A oneshot in `init-mods-end/dependencies.d/` that does network I/O.** That
+  registration is what makes the application wait for it, which is usually the
+  point — but the app then waits for every timeout the oneshot can hit. A
+  notification oneshot registered there was measured delaying Duplicati by 22
+  seconds against an unreachable endpoint; leaving it out of `init-mods-end` and
+  relying on its own `dependencies.d` for ordering cost nothing and still ran it.
 
 ## CI
 

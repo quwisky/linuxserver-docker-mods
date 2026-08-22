@@ -1,0 +1,69 @@
+# Interactive harness: the whole mod inside a real linuxserver/duplicati
+# container, with Discord stubbed by Caddy. Not run in CI -- test/smoke.sh is
+# the automated version of this, and it needs no bind mounts.
+#
+#   cd test
+#   docker compose -f docker-compose.test.yml up -d
+#   docker compose -f docker-compose.test.yml logs -f duplicati | grep mod-discord-notify
+#
+# Duplicati's web UI is then on http://localhost:8200. The one manual step the
+# mod cannot do for you applies here too -- Settings -> Default options:
+#
+#   --run-script-after=/usr/local/bin/duplicati-discord.sh
+#   --run-script-result-output-format=Json
+#
+# Then create a backup job pointed at /backups and run it. What arrived is in
+# the stub's log, body and all:
+#
+#   docker compose -f docker-compose.test.yml logs discord-stub | grep '"body"'
+#
+# Inner loop after editing the script on the host -- no rebuild, no restart,
+# because Duplicati execs it fresh every run:
+#
+#   just run the job again.
+#
+# Swap Caddyfile.discord-ok for .discord-429 or .discord-404 below and restart
+# that one service to exercise the failure paths.
+
+name: duplicati-discord-notify-test
+
+services:
+  discord-stub:
+    image: caddy:2-alpine
+    container_name: dup-discord-stub
+    volumes:
+      # Swap for Caddyfile.discord-{429,404} to change scenario.
+      - ./stubs/Caddyfile.discord-ok:/etc/caddy/Caddyfile:ro
+    restart: unless-stopped
+
+  duplicati:
+    image: lscr.io/linuxserver/duplicati:latest
+    container_name: dup-duplicati
+    ports:
+      - 8200:8200
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      # Point the mod at the stub rather than at a real Discord webhook.
+      - DISCORD_WEBHOOK_URL=http://discord-stub:8080/api/webhooks/1234567890/aTokenThatIsNotReal
+      - DISCORD_NOTIFY_ON=all
+      - DISCORD_NOTIFY_OPERATIONS=*
+      - DISCORD_HOSTNAME=harness
+      - DISCORD_DEBUG=true
+    volumes:
+      # The mod, mounted directly, bypassing /docker-mods entirely. The host's
+      # 755 carries through, so a forgotten chmod +x fails here rather than in
+      # CI. The init oneshot is mounted too, since it is what asks for jq.
+      - ../root/usr/local/bin/duplicati-discord.sh:/usr/local/bin/duplicati-discord.sh:ro
+      - ../root/etc/s6-overlay/s6-rc.d/init-mod-duplicati-discord-notify-mod:/etc/s6-overlay/s6-rc.d/init-mod-duplicati-discord-notify-mod:ro
+      - ../root/etc/s6-overlay/s6-rc.d/user/contents.d/init-mod-duplicati-discord-notify-mod:/etc/s6-overlay/s6-rc.d/user/contents.d/init-mod-duplicati-discord-notify-mod:ro
+      - dup-test-config:/config
+      - dup-test-backups:/backups
+    depends_on:
+      - discord-stub
+    restart: unless-stopped
+
+volumes:
+  dup-test-config:
+  dup-test-backups:

@@ -1,0 +1,28 @@
+# Discord's webhook endpoint, happy path.
+#
+# The interesting directive is `log_append body {http.request.body}`: Caddy's
+# access log records headers but never bodies, and the whole point of the smoke
+# test is to assert on the payload that actually arrived rather than on the one
+# the mod believes it built. With this, `docker logs` carries the exact bytes.
+:8080 {
+	log {
+		output stdout
+		format json
+	}
+
+	handle /api/webhooks/* {
+		# The mod must send application/json. Discord rejects anything else, and
+		# a stub that accepted text/plain would hide that.
+		@wrong_type not header Content-Type application/json
+		handle @wrong_type {
+			respond "expected application/json" 415
+		}
+
+		log_append body {http.request.body}
+		respond "" 204
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}
