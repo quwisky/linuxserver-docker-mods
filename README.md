@@ -45,7 +45,7 @@ ordinary tags:
 | --- | --- | --- |
 | `ghcr.io/<owner>/<app>-<mod>:latest` | `master` | every push that changes the mod |
 | `ghcr.io/<owner>/<app>-<mod>:<commit-sha>` | `master` | immutable pin of the above |
-| `ghcr.io/<owner>/<app>-<mod>:nightly` | `develop` | nightly, if the mod changed |
+| `ghcr.io/<owner>/<app>-<mod>:nightly` | `develop` | every push that changes the mod, and nightly |
 | `ghcr.io/<owner>/<app>-<mod>:nightly-<tree-sha>` | `develop` | immutable pin of the above |
 | `ghcr.io/<owner>/<app>-<mod>:<your-tag>` | any branch | manual run with a custom tag |
 
@@ -255,17 +255,24 @@ they are not obvious and they shape this design:
   cron slot from a hash of its name, spreading them across 02:00–05:59 UTC, and
   `ci/check-mod-workflows.sh` fails on a collision.
 
-A nightly runs the full test suite every night even when the mod has not
-changed — the smoke harness pulls `bash:5` and `caddy:2-alpine`, so upstream
-breakage surfaces in CI rather than in someone's container. Only the *publish*
-is skipped when nothing changed, which is what the content-addressed
-`-nightly-<tree-sha>` pin is for: the tag is the git tree hash of
-`mods/<app>/<mod>`, so unchanged content resolves to a tag that already exists and
-the push is a no-op instead of registry churn.
+The cron runs the full test suite every night even when the mod has not changed
+— the smoke harness pulls `bash:5` and `caddy:2-alpine`, so upstream breakage
+surfaces in CI rather than in someone's container. Only the *publish* is skipped
+when nothing changed, which is what the content-addressed `-nightly-<tree-sha>`
+pin is for: the tag is the git tree hash of `mods/<app>/<mod>`, so unchanged
+content resolves to a tag that already exists and the push is a no-op instead of
+registry churn. That same dedupe is why a push to `develop` that only touched
+the shared CI file does not churn every mod's `:nightly`.
 
-Pushes to `develop` and to feature branches, and all pull requests, test without
-publishing. A manual `workflow_dispatch` from `master` or `develop` publishes to
-the matching channel without waiting for a commit or for the cron.
+**A push to `develop` publishes `:nightly` immediately**, the same way a push to
+`master` publishes `:latest`. The cron is a backstop for the tests, not the
+delivery mechanism — without this, `:nightly` would mean "develop as of last
+night", which is a confusing thing to hand someone who just merged a fix and
+wants to try it.
+
+Pushes to feature branches and all pull requests test without publishing. A
+manual `workflow_dispatch` from `master` or `develop` publishes to the matching
+channel without waiting for a commit or for the cron.
 
 If `develop` does not exist yet, the nightly reports that once as a notice and
 exits cleanly rather than failing red every night.

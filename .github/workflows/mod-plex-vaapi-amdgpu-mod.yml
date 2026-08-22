@@ -44,6 +44,15 @@ on:
         required: false
         type: string
 
+# A publish moves a shared tag, so two runs for the same ref must not overlap:
+# push twice to develop a minute apart and both runs push :nightly, with the
+# older one free to land last. Serialised rather than cancelled -- killing a run
+# mid-push is how a manifest ends up half-written, and the queued run is the
+# newer commit anyway.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   packages: write
@@ -66,11 +75,15 @@ jobs:
       channel: >-
         ${{ ((github.event_name == 'schedule' && github.event.schedule != '0 3 1 * *')
              || github.ref == 'refs/heads/develop') && 'nightly' || 'release' }}
-      # Publish on either schedule, on a push to master, and on a manual run from
-      # main or develop. Pushes to feature branches and all PRs test only.
+      # Publish on either schedule, on a push to either channel branch (master
+      # moves :latest, develop moves :nightly), and on a manual run from one of
+      # them or with a custom tag. Pushes to feature branches and all PRs test
+      # only.
       publish: >-
         ${{ github.event_name == 'schedule'
-            || (github.event_name == 'push' && github.ref == 'refs/heads/master')
+            || (github.event_name == 'push'
+                && (github.ref == 'refs/heads/master'
+                    || github.ref == 'refs/heads/develop'))
             || (github.event_name == 'workflow_dispatch'
                 && (inputs.tag != ''
                     || github.ref == 'refs/heads/master'

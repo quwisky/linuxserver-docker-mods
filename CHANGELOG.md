@@ -17,6 +17,16 @@ numbered. See [Release channels](README.md#release-channels).
 
 ## [Unreleased]
 
+### Changed
+
+- **`:nightly` is now published on every push to `develop`**, not only by the
+  nightly cron. `:nightly` previously meant "develop as of last night", which is
+  a confusing thing to hand someone who has just merged a fix and wants to try
+  it; it now means what it says. The cron still runs — it is what re-tests every
+  mod against current base images — and the content-addressed pin still skips a
+  publish when nothing changed, so a push that only touched shared CI does not
+  churn every mod's `:nightly`.
+
 ### Added
 
 - **duplicati-discord-notify-mod** — a new mod for `linuxserver/duplicati`,

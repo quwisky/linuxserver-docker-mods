@@ -274,10 +274,16 @@ Published tags:
 | Tag | From | Notes |
 | --- | --- | --- |
 | `:latest` | `master` | What you want. Also rebuilt monthly for fresh Mesa. |
-| `:<commit-sha>-<YYYYMMDD>` | `master` | Immutable. Pin this to hold a known-good Mesa snapshot. |
+| `:<commit-sha>-<YYYYMMDD>-<run-id>` | `master` | Immutable. Pin this to hold a known-good Mesa snapshot. |
 | `:nightly` | `develop` | Changes before they reach `:latest`. |
-| `:nightly-<tree-sha>-<YYYYMMDD>` | `develop` | Immutable nightly pin. |
+| `:nightly-<tree-sha>-<YYYYMMDD>-<run-id>` | `develop` | Immutable nightly pin. |
 | `:<your-tag>` | any branch | A manual run with the **tag** field filled in. Publishes that tag alone, leaving `:latest` and `:nightly` untouched. |
+
+The run id is what keeps those immutable. This mod opts out of the
+content-addressed dedupe — its image comes from `alpine:edge`, so an unchanged
+git tree does *not* mean an unchanged image — which means two rebuilds on the
+same day would otherwise land on the same date-stamped tag and the second would
+overwrite the first.
 
 Tags in the older `mesa-edge-YYYY-MM-DD` format were published while this mod
 lived in its own repository. They still resolve, but new builds do not use that
