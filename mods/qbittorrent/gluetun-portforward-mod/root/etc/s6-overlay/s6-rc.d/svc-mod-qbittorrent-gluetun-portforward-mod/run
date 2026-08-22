@@ -14,17 +14,21 @@
 #    fallible call is checked explicitly and every global is initialised below,
 #    with shellcheck in CI catching what `set -u` would have.
 #
-#  * Writes nothing to disk. qBittorrent owns qBittorrent.conf and rewrites it
-#    from memory on exit, so editing it under a running client loses the edit;
-#    the WebUI API is the only correct way in. That also makes
-#    LSIO_READ_ONLY_FS a non-event.
+#  * Touches no configuration on disk. qBittorrent owns qBittorrent.conf and
+#    rewrites it from memory on exit, so editing it under a running client loses
+#    the edit; the WebUI API is the only correct way in. That also makes
+#    LSIO_READ_ONLY_FS a non-event. The one exception is the netns watchdog's
+#    halt counter under /run, written only while that opt-in feature is armed
+#    and treated as best-effort -- see netns-watchdog.sh.
 #
-#  * Runs as the container's default identity: no s6-setuidgid, no lsiown. We
-#    create no files, so there is no ownership to get wrong, and this keeps
-#    LSIO_NON_ROOT_USER working with zero special-casing.
+#  * Runs as the container's default identity: no s6-setuidgid, no lsiown. The
+#    only file we create is that counter, in a directory we make ourselves, so
+#    there is no ownership to get wrong and LSIO_NON_ROOT_USER needs no
+#    special-casing.
 #
-#  * All state lives in shell variables. A restart is always safe: the loop
-#    re-reads qBittorrent's actual preferences and re-converges.
+#  * All state lives in shell variables, bar that counter -- which has to
+#    outlive the halt, because the halt ends the process. A restart is always
+#    safe: the loop re-reads qBittorrent's actual preferences and re-converges.
 #===============================================================================
 
 MOD="gluetun-portforward"
@@ -88,6 +92,35 @@ state() {
 falsey() { [[ ${1,,} =~ ^(0|false|no|off|disable|disabled)$ ]]; }
 truthy() { [[ ! ${1,,} =~ ^(0|false|no|off|disable|disabled)$ ]]; }
 is_uint() { [[ $1 =~ ^[0-9]+$ ]]; }
+
+#-------------------------------------------------------------------------------
+# The netns watchdog. Sourced rather than inlined so it can be unit-tested, and
+# so every gluetun-portforward mod builds from ONE copy of it in shared/ rather
+# than a duplicate per mod.
+#
+# Sourced HERE, after log/loud/truthy/is_uint exist, so the helper binds to this
+# mod's real logging rather than to its own fallbacks -- but still before
+# configure(), which is what arms it.
+#
+# Default off. Absent the helper, or with GLUETUN_PF_NETNS_WATCHDOG unset, the
+# stubs below make netns_watchdog_check a no-op and this file behaves exactly as
+# it did before the feature existed.
+#-------------------------------------------------------------------------------
+# Overridable only through the mod's own prefix: this script runs under
+# with-contenv, so every container variable is in scope, and an unprefixed name
+# here would mean an unrelated variable could decide which file we source as root.
+NETNS_WATCHDOG_LIB="${GLUETUN_PF_NETNS_WATCHDOG_LIB:-/usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh}"
+if [[ -r ${NETNS_WATCHDOG_LIB} ]]; then
+    # shellcheck source-path=SCRIPTDIR
+    # shellcheck source=../../../../../../../../shared/mod-gluetun-portforward/netns-watchdog.sh
+    . "${NETNS_WATCHDOG_LIB}"
+fi
+# Defence in depth: a partial overlay must not break the poll loop.
+if ! declare -F netns_watchdog_check >/dev/null 2>&1; then
+    netns_watchdog_configure() { NETNS_WATCHDOG=0; }
+    netns_watchdog_enabled() { return 1; }
+    netns_watchdog_check() { return 0; }
+fi
 
 curl_hint() {
     case ${1} in
@@ -165,6 +198,8 @@ configure() {
     else
         QBT_AUTH_MODE="none (relies on qBittorrent's localhost auth bypass)"
     fi
+
+    netns_watchdog_configure
 }
 
 #-------------------------------------------------------------------------------
@@ -618,10 +653,27 @@ main() {
     else
         log "random_port / upnp     : left alone"
     fi
+    if netns_watchdog_enabled; then
+        if ((NETNS_DRY_RUN)); then
+            log "netns watchdog         : DRY RUN, ${NETNS_STRIKES_MAX} strikes, ${NETNS_GRACE}s grace (logs the decision, halts nothing)"
+        else
+            if ((NETNS_MAX_HALTS > 0)); then
+                log "netns watchdog         : armed, ${NETNS_STRIKES_MAX} strikes, ${NETNS_GRACE}s grace, exit ${NETNS_EXIT_CODE}, gives up after ${NETNS_MAX_HALTS} halt(s)"
+            else
+                log "netns watchdog         : armed, ${NETNS_STRIKES_MAX} strikes, ${NETNS_GRACE}s grace, exit ${NETNS_EXIT_CODE}, never gives up"
+            fi
+            log "  -> needs 'restart: unless-stopped' on this container, or halting it is not a recovery"
+        fi
+    fi
 
     local unreachable_streak=0
 
     while ((!TERMINATE)); do
+        # FIRST, before any request. Once the namespace is dead every port-sync
+        # attempt fails anyway, so checking later would bury the diagnosis under
+        # a wall of connection errors. Off by default; never returns if it halts.
+        netns_watchdog_check
+
         if ! qbt_up; then
             state qbt down && loud "waiting for qBittorrent to answer on ${QBT_URL} ($(curl_hint "${HTTP_RC}"))"
             _sleep "${RETRY_INTERVAL}"

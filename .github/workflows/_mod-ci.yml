@@ -269,9 +269,14 @@ jobs:
           # Build the first declared platform: --load cannot take a multi-arch
           # result, and building an arch the mod does not support would be a
           # meaningless check.
+          #
+          # The context is the repo root, not the mod directory, so a Dockerfile
+          # can reach shared/ as well as its own root/. Everything a mod ships is
+          # still named explicitly by its COPY lines.
           docker buildx build --load --provenance=false \
             --platform "${PLATFORMS%%,*}" \
-            -t "local/${ID}:test" "${DIR}"
+            -f "${DIR}/Dockerfile" \
+            -t "local/${ID}:test" .
           layers=$(docker image inspect "local/${ID}:test" --format '{{len .RootFS.Layers}}')
           size=$(docker image inspect "local/${ID}:test" --format '{{.Size}}')
           echo "${ID}: ${layers} layer(s), ${size} bytes"
@@ -366,10 +371,13 @@ jobs:
             if [[ ${DEDUPE} != "true" ]]; then stamp="-$(date -u +%Y%m%d)"; fi
 
             if [[ ${CHANNEL} == nightly ]]; then
-              # Content-addressed: the git tree hash of just this mod's
-              # directory. Identical content always yields the same pin, which
-              # is what makes the skip below possible.
-              tree="$(git rev-parse --short=12 "HEAD:${DIR}")"
+              # Content-addressed over everything the image is built FROM: this
+              # mod's directory plus any shared/ directory its Dockerfile copies.
+              # Identical content always yields the same pin, which is what makes
+              # the skip below possible -- and hashing only the mod directory
+              # would make a shared/ change produce a different image under a pin
+              # that already exists, so the publish would be skipped silently.
+              tree="$(ci/mod-inputs.sh --hash "${DIR}")"
               moving="${pkg}:nightly"
               pinned="${pkg}:nightly-${tree}${stamp}"
               echo "mod tree hash: ${tree}"
@@ -415,7 +423,11 @@ jobs:
       - uses: docker/build-push-action@v7
         if: steps.dedupe.outputs.skip != 'true'
         with:
-          context: ${{ env.DIR }}
+          # Repo root, so a Dockerfile can COPY from shared/ as well as from its
+          # own mods/<app>/<mod>/root/. See ci/mod-inputs.sh for why the nightly
+          # pin has to follow suit.
+          context: .
+          file: ${{ env.DIR }}/Dockerfile
           platforms: ${{ inputs.platforms }}
           # provenance would add an attestation manifest; a mod must stay a
           # single layer because /docker-mods only reads .layers[0].

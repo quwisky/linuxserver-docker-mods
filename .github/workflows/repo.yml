@@ -25,11 +25,20 @@ jobs:
       - name: every mod has a CI workflow, and every workflow has a mod
         run: ci/check-mod-workflows.sh
 
-      - name: shellcheck the shared tooling and the template
+      - name: shared/ is wired up correctly
+        # Belongs here rather than in a mod's own workflow precisely because this
+        # one has no paths filter: the failure it exists to catch is a mod whose
+        # workflow does NOT react to the shared code it builds from, and that
+        # mod's workflow is exactly what would not run.
+        run: ci/check-shared-files.sh
+
+      - name: shellcheck the shared tooling, shared/ and the template
         # Per-mod scripts are checked by that mod's own workflow; these belong to
-        # no mod, so nothing else would ever look at them.
+        # no mod, so nothing else would ever look at them. shared/ is in the list
+        # because it moved OUT of the mod directories -- without it, the helper
+        # every gluetun mod sources would be linted by nothing.
         run: |
-          mapfile -t files < <(find ci template -type f \
+          mapfile -t files < <(find ci template shared -type f \
             \( -name run -o -name finish -o -name check -o -name '*.sh' \) 2>/dev/null | sort)
           if ((${#files[@]} == 0)); then echo "nothing to check"; exit 0; fi
           printf '  %s\n' "${files[@]}"
@@ -63,7 +72,9 @@ jobs:
           done
           bad=$(find "${d}" \( -name run -o -name finish -o -name check \) -not -perm -u=x,g=x,o=x -print)
           [[ -z ${bad} ]] || { echo "::error::scaffold produced non-executable scripts:"; echo "${bad}"; rc=1; }
-          docker build -q -t local/scaffold-check "${d}" >/dev/null
+          # Context is the scaffold's own "repo root", matching how a real mod is
+          # built: the Dockerfile's COPY paths are repo-relative now.
+          docker build -q -f "${d}/Dockerfile" -t local/scaffold-check "${scratch}" >/dev/null
           layers=$(docker image inspect local/scaffold-check --format '{{len .RootFS.Layers}}')
           [[ ${layers} == 1 ]] || { echo "::error::scaffold built ${layers} layers, expected 1"; rc=1; }
           rm -rf "${scratch}"

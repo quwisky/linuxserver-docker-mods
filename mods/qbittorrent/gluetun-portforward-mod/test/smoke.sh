@@ -58,9 +58,17 @@ build_runner() {
     mkdir -p "${d}"
     cp "${SVC}/run" "${d}/run"
     cp "${SVC}/finish" "${d}/finish"
+    # Ship the netns-watchdog helper at the absolute path ./run looks for, so
+    # these scenarios exercise the real code path rather than the no-op stubs
+    # ./run falls back to when the helper is missing.
+    cp "${REPO}/../../../shared/mod-gluetun-portforward/netns-watchdog.sh" "${d}/netns-watchdog.sh"
     # The real shebang is #!/usr/bin/with-contenv bash, which only exists in an
     # LSIO image, so invoke bash explicitly. The script body is plain bash.
-    printf 'FROM bash:5\nRUN apk add --no-cache curl jq\nCOPY run /run.sh\nCOPY finish /finish.sh\n' >"${d}/Dockerfile"
+    #
+    # /dead-netns stands in for a /sys/class/net holding nothing but lo, which is
+    # what a container stranded in a destroyed namespace sees. The real one here
+    # has eth0, so the watchdog would never fire against it.
+    printf 'FROM bash:5\nRUN apk add --no-cache curl jq && mkdir -p /dead-netns && touch /dead-netns/lo\nCOPY run /run.sh\nCOPY finish /finish.sh\nCOPY netns-watchdog.sh /usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh\n' >"${d}/Dockerfile"
     ctx "${d}" | docker build -q -t qbtsmoke/runner - >/dev/null
 }
 
@@ -248,7 +256,43 @@ else
 fi
 
 #------------------------------------------------------------------------------
-say "Scenario 11: SIGTERM shuts down promptly instead of waiting out the poll"
+say "Scenario 11: the netns watchdog is off unless it is asked for"
+# The whole safety promise of the feature: someone already pulling :latest must
+# see byte-identical behaviour until they set the flag.
+run_scenario qbtsmoke/caddyfile-gluetun-ok qbtsmoke/caddyfile-qbt 10 \
+    GLUETUN_PF_NETNS_SYSFS=/dead-netns
+refute "$MODLOG" 'says nothing about a watchdog' 'netns watchdog'
+refute "$MODLOG" 'does not report a strike' 'stranded in a dead network namespace'
+expect "$MODLOG" 'and still does its actual job' 'listening port is now 54321'
+if [[ $(docker inspect -f '{{.State.Running}}' qbt-mod) == true ]]; then
+    printf '  ok   still running -- a dead namespace alone halts nothing\n'
+else
+    printf '  FAIL the mod exited with the watchdog unset\n'
+    FAILED=$((FAILED + 1))
+fi
+
+#------------------------------------------------------------------------------
+say "Scenario 11b: dry run reaches the decision and refuses to act on it"
+# The halt itself replaces PID 1 of a real s6 container and cannot be reached
+# from here, which is exactly why the dry-run flag exists.
+run_scenario qbtsmoke/caddyfile-gluetun-ok qbtsmoke/caddyfile-qbt 14 \
+    GLUETUN_PF_NETNS_SYSFS=/dead-netns \
+    GLUETUN_PF_NETNS_WATCHDOG=true GLUETUN_PF_NETNS_WATCHDOG_DRY_RUN=true \
+    GLUETUN_PF_NETNS_WATCHDOG_GRACE=0 GLUETUN_PF_NETNS_WATCHDOG_STRIKES=2
+dump "$MODLOG"
+expect "$MODLOG" 'announces itself as a dry run' 'netns watchdog *: DRY RUN'
+expect "$MODLOG" 'counts a strike' 'stranded in a dead network namespace \(strike 1/2\)'
+expect "$MODLOG" 'reaches the threshold' 'strike 2/2'
+expect "$MODLOG" 'says what it would have done' 'DRY RUN: would halt the container now with exit 70'
+if [[ $(docker inspect -f '{{.State.Running}}' qbt-mod) == true ]]; then
+    printf '  ok   still running -- dry run halts nothing\n'
+else
+    printf '  FAIL dry run halted the container\n'
+    FAILED=$((FAILED + 1))
+fi
+
+#------------------------------------------------------------------------------
+say "Scenario 12: SIGTERM shuts down promptly instead of waiting out the poll"
 docker rm -f qbt-mod >/dev/null 2>&1
 docker run -d --name qbt-mod --network "${NET}" \
     -e GLUETUN_PF_CONTROL_URL=http://gluetun-stub:8000 \

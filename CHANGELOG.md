@@ -19,6 +19,76 @@ numbered. See [Release channels](README.md#release-channels).
 
 Nothing yet.
 
+## [2026-08-22]
+
+### Added
+
+- **plex-gluetun-portforward-mod**, **qbittorrent-gluetun-portforward-mod** — an
+  opt-in watchdog that can **halt its own container**, to recover from a gluetun
+  restart. **Off by default**: nothing changes until
+  `GLUETUN_PF_NETNS_WATCHDOG=true` is set, and containers already pulling
+  `:latest` behave byte-identically until then.
+
+  `network_mode: service:gluetun` joins gluetun's network namespace by container
+  ID. When gluetun *restarts* — not merely reconnects — that namespace is
+  destroyed, and Docker never re-attaches the app container. It is left stranded
+  with only `lo`: up, healthy-looking, unreachable, and unable to route out until
+  something restarts it. The watchdog detects this from the inside and exits
+  PID 1 so the restart policy brings the container back attached correctly.
+
+  The signal is the absence of any non-loopback interface in `/sys/class/net`,
+  which is what makes it safe to act on: a VPN reconnect tears down `tun0` but
+  leaves `eth0`, so a reconnect cannot be mistaken for an orphaning. Reachability
+  of gluetun's control server is deliberately not used, since it cannot tell the
+  two apart. The scan is pure bash against `/sys` — no new packages.
+
+  It also gives up. Halting is only a recovery if the container comes back, and
+  when it does not — no `restart:` policy, or a shutdown that cannot complete —
+  s6 restarts the service and the cycle would repeat forever. After
+  `_MAX_HALTS` attempts (default 3) the watchdog switches itself off, says why,
+  and leaves the port sync running. The count is per container start rather than
+  cumulative, so halts that work never use the budget up; only failed ones do.
+  Keeping that count means writing one small file under `/run`, which is the
+  only thing either mod writes anywhere — the count has to outlive the halt,
+  and the halt ends the process.
+
+  `restart: unless-stopped` (or `on-failure`) is required; halting is only half
+  the mechanism. The halt is graceful, so s6 runs the shutdown sequence and the
+  application closes its files properly — qBittorrent writes its fastresume data,
+  Plex closes its library database — which is the advantage over an external
+  `docker kill`. Tunable via `_STRIKES`, `_GRACE`, `_EXIT_CODE`, and a `_DRY_RUN`
+  that logs the decision without acting on it. Both mods use the same variable
+  names, so running both behind one gluetun means one set of values.
+
+  Picking this up needs `docker compose up -d --force-recreate`, since a mod is
+  only re-applied when a container is recreated, not restarted.
+
+- A `shared/` directory for code more than one mod overlays, so the netns
+  watchdog exists once rather than as a copy per mod. Each mod's **build context
+  is now the repo root** instead of its own directory, which is what makes
+  `shared/` reachable; the single-layer rule is unchanged, because a mod that
+  needs two sources assembles them in a `FROM scratch` stage and the final stage
+  takes the result in one `COPY --from`. A mod that shares nothing keeps a single
+  plain `COPY`.
+
+  Two things had to follow, and both are enforced rather than documented:
+
+  - `ci/check-shared-files.sh` fails the build when a mod copies `shared/<name>`
+    without carrying `'shared/<name>/**'` in its workflow's `paths:` filter. Per-mod
+    workflows are gated on their own directory, so without that filter a change to
+    shared code would alter the mod's image without running its tests or its
+    build — the same silent failure as a mod having no workflow at all. It also
+    reports shared directories nothing uses, and still refuses to let two mods
+    ship different content at the same container path.
+  - `ci/mod-inputs.sh` derives the nightly content hash from the mod directory
+    *plus* every `shared/` directory its Dockerfile copies, reading the list from
+    the Dockerfile so it cannot drift. The old pin hashed the mod directory alone,
+    which would have made a shared-code change produce a different image under a
+    pin that already existed — and the nightly publish is deduped on exactly that,
+    so it would have been skipped silently, every night.
+
+  The per-mod `.dockerignore` files are gone, replaced by one at the repo root.
+
 ## [2026-07-30]
 
 ### Added

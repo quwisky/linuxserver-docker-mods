@@ -210,6 +210,131 @@ file has **no trailing newline**.
 | `GLUETUN_PF_RETRY_INTERVAL` | `10` | Seconds between retries while waiting for prerequisites. Clamped to ≥ 2. |
 | `GLUETUN_PF_TIMEOUT` | `10` | Per-request timeout. The connect timeout is fixed at 5 s. |
 
+## Recovering from a gluetun restart (opt-in)
+
+**Off by default.** This is the one feature here that can stop your container, so
+it never arrives by surprise — nothing below happens until you set
+`GLUETUN_PF_NETNS_WATCHDOG=true`.
+
+### The problem
+
+`network_mode: service:gluetun` joins gluetun's network namespace **by container
+ID**. When the gluetun container *restarts* — not merely reconnects — that
+namespace is destroyed and a new one is created. Docker never re-attaches
+qBittorrent, so it is left stranded in the dead one: `eth0` went with the veth
+pair, `tun0` went with gluetun's tun device, and only `lo` remains.
+
+The result is a container that is up, healthy-looking, and completely isolated.
+The WebUI is unreachable (its port is published on gluetun), nothing routes out,
+and it stays that way until qBittorrent's container is restarted — at which point
+Docker re-resolves `network_mode` against gluetun's *current* namespace and
+everything works again.
+
+### What the watchdog does
+
+Each poll it looks for any non-loopback interface in `/sys/class/net`. If there
+is none for several consecutive polls, it halts the container so Docker's restart
+policy brings it back attached correctly.
+
+That specific signal is what makes this safe: a VPN **reconnect** tears down
+`tun0` but leaves `eth0` alone, so it cannot be mistaken for an orphaned
+namespace. Reachability of gluetun's control server is deliberately *not* used —
+it cannot tell a reconnect from an orphaning, and acting on it would restart your
+container every time the VPN blipped.
+
+### `restart: unless-stopped` is mandatory
+
+Halting **is** the recovery mechanism; the restart policy is what completes it.
+With no policy, the container simply stops and stays stopped. `unless-stopped` or
+`on-failure` both work — the exit code is non-zero by default precisely so
+`on-failure` does.
+
+```yaml
+  qbittorrent:
+    network_mode: service:gluetun
+    restart: unless-stopped          # <- without this the watchdog just stops it
+    environment:
+      - GLUETUN_PF_NETNS_WATCHDOG=true
+```
+
+### Variables
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `GLUETUN_PF_NETNS_WATCHDOG` | `false` | The master switch. Everything below is inert until this is truthy. |
+| `GLUETUN_PF_NETNS_WATCHDOG_DRY_RUN` | `false` | Log the decision and halt nothing. Use it to confirm the mod sees what you expect before arming it. |
+| `GLUETUN_PF_NETNS_WATCHDOG_STRIKES` | `4` | Consecutive failed checks before halting. Clamped to ≥ 1. |
+| `GLUETUN_PF_NETNS_WATCHDOG_GRACE` | `60` | Seconds after the service starts before the watchdog arms, because the namespace is still being set up early in container start. |
+| `GLUETUN_PF_NETNS_WATCHDOG_EXIT_CODE` | `70` | Exit status. Must be 1–255, so `restart: on-failure` also works. |
+| `GLUETUN_PF_NETNS_WATCHDOG_MAX_HALTS` | `3` | How many times it will halt in one container lifetime before concluding that halting is not helping and switching itself off. `0` means never give up. |
+
+### When halting does not help
+
+Halting only recovers the container if it actually comes back. If it does not —
+no `restart:` policy, or a shutdown that cannot complete — s6 restarts just this
+service, the grace period re-arms, and without a cap the container would be
+halted on a loop indefinitely.
+
+So after `GLUETUN_PF_NETNS_WATCHDOG_MAX_HALTS` attempts it stops trying, says
+why, and leaves the port sync running:
+
+```
+[mod-gluetun-portforward] **** already halted 3 time(s) since this container started and it is still stranded; giving up ****
+[mod-gluetun-portforward]   -> halting is plainly not recovering this container, so continuing would just restart it forever.
+[mod-gluetun-portforward]   -> check it has 'restart: unless-stopped' (or 'on-failure'): without a restart policy the halt stops it for good.
+[mod-gluetun-portforward]   -> the watchdog is now off until this container is restarted. The port sync carries on regardless.
+```
+
+The count is per **container start**, not cumulative: a halt that works gets you
+a fresh container and a fresh budget, so normal gluetun restarts never use it up.
+Only *failed* halts accumulate. A namespace that recovers on its own also hands
+the budget back.
+
+This is the one thing either mod writes anywhere — a single small file under
+`/run`, because the count has to survive the halt, and the halt ends the process.
+
+**How long it actually takes:** roughly **30–40 seconds** after gluetun goes
+away, not `4 × 60`. A dead namespace also means gluetun's control server is
+unreachable, and that path already retries every `GLUETUN_PF_RETRY_INTERVAL`
+(10 s) for the first six attempts before relaxing to the full interval. Four
+strikes land inside that fast window.
+
+### What you will see
+
+```
+[mod-gluetun-portforward] netns watchdog         : armed, 4 strikes, 60s grace, halts with exit 70
+...
+[mod-gluetun-portforward] **** no non-loopback interface in /sys/class/net -- this container looks stranded in a dead network namespace (strike 1/4) ****
+[mod-gluetun-portforward] **** ... (strike 4/4) ****
+[mod-gluetun-portforward] **** halting the container so docker re-attaches it to gluetun's namespace (exit 70) ****
+```
+
+If the namespace comes back before the count runs out, it says so and resets:
+
+```
+[mod-gluetun-portforward] **** network namespace recovered after 2 strike(s); watchdog reset ****
+```
+
+### Things worth knowing before you turn it on
+
+- **The halt is graceful.** s6 runs its full shutdown sequence, so qBittorrent
+  gets a proper `SIGTERM` and writes its fastresume data before exiting. That is
+  the advantage over an external `docker kill`, which loses it.
+- **`docker ps` will look alarming for a moment.** Docker refuses to start a
+  container whose `network_mode: service:` target is not running, so if gluetun
+  is still starting the restart retries with backoff and you will see it flapping
+  in `Restarting`. That is correct behaviour — the container cannot leak while it
+  is stopped — but it looks like a crash loop, so do not panic and file a bug.
+- **Two apps behind one gluetun both halt.** If you run this mod and the Plex one
+  behind the same gluetun and arm both, they will halt and restart independently
+  within a few seconds of each other. That needs no coordination and is fine; it
+  just reads like a cascade in the logs.
+- **A mod is only re-applied when the container is recreated**, not restarted. To
+  pick this feature up:
+  `docker compose up -d --force-recreate qbittorrent`.
+- **Try `GLUETUN_PF_NETNS_WATCHDOG_DRY_RUN=true` first** if you want to see the
+  detection without granting it the ability to stop anything.
+
 ## How it works
 
 Each poll, in order:
@@ -271,6 +396,11 @@ is exactly why this failure goes unnoticed.
 | `401 Unauthorized on every known port-forward route` | gluetun auth. The mod prints the exact `config.toml` role to paste. |
 | `gluetun reports no forwarded port yet` | Normal. VPN down or renegotiating; qBittorrent is left alone and the port is re-applied when it returns. |
 | `re-applying … after a port outage` | Expected, and deliberate. See above. |
+| `stranded in a dead network namespace (strike n/4)` | gluetun's container was restarted and took the namespace with it. Only appears with the watchdog on; after the last strike the container halts and Docker restarts it attached correctly. |
+| `network namespace recovered … watchdog reset` | A false alarm that cleared on its own. Nothing to do. |
+| `halting the container so docker re-attaches it` | The watchdog fired. If the container then stays down, it has no `restart:` policy — that is the missing half of the mechanism. |
+| `DRY RUN: would halt the container now` | The watchdog would have acted but `GLUETUN_PF_NETNS_WATCHDOG_DRY_RUN` is on. Unset it to arm. |
+| The container sits in `Restarting` after a halt | Docker will not start a container whose `network_mode: service:` target is down. It retries with backoff and settles once gluetun is up. Correct, if unnerving. |
 
 ## Limitations
 
@@ -328,9 +458,10 @@ docker run --rm -v "$PWD:/mnt" -w /mnt bash:5 sh -c 'apk add -q jq && bash test/
 
 End-to-end smoke test — runs the real `run` script against Caddy stubs for both
 gluetun and qBittorrent, and asserts on its log output and on the requests that
-actually reached the stub. Eleven scenarios covering the happy path, the
+actually reached the stub. Thirteen scenarios covering the happy path, the
 re-apply-after-outage behaviour, both authentication routes, wrong credentials,
-every gluetun response shape and SIGTERM handling:
+every gluetun response shape, the netns watchdog staying off by default, and
+SIGTERM handling:
 
 ```bash
 bash test/smoke.sh
@@ -341,11 +472,24 @@ Before pushing:
 ```bash
 shellcheck -x \
   root/etc/s6-overlay/s6-rc.d/svc-mod-qbittorrent-gluetun-portforward-mod/{run,finish} \
+  root/usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh \
   test/run_tests.sh test/smoke.sh
 
 # s6 silently ignores non-executable service scripts, so this must print nothing
 find . \( -name run -o -name finish -o -name check \) -not -perm -0111 -print
 ```
+
+The netns watchdog lives once, in `shared/mod-gluetun-portforward/`, rather
+than being copied into each mod. A mod is still a single-layer image, so the
+Dockerfile assembles `root/` and the shared directory in a `FROM scratch`
+*assembly* stage and the final stage takes the result in one `COPY --from`.
+The build context is the repo root, which is what makes `shared/` reachable.
+
+Two consequences worth knowing: editing that file changes every
+gluetun-portforward mod's image at once, and this mod's workflow therefore
+carries a `paths:` filter for `shared/mod-gluetun-portforward/**` so a change
+there actually runs its tests. `ci/check-shared-files.sh` fails the build if
+that filter goes missing.
 
 ## Credits
 

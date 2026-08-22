@@ -87,18 +87,54 @@ replace `:latest` with a build from an arbitrary branch.
 mods/
   <app>/                        one directory per application being modded
     <modname>/                  one mod
-      Dockerfile                FROM scratch + COPY root/ /
-      .dockerignore             keeps everything but root/ out of the image
+      Dockerfile                FROM scratch; COPY paths are repo-relative
       README.md                 that mod's documentation
       root/                     overlaid onto the target container's filesystem
       test/                     optional; whatever that mod ships (see below)
+shared/
+  <name>/                       code more than one mod overlays; see below
 template/                       scaffold for a new mod, never built
-ci/                             scaffolding and the workflow-coverage check
+ci/                             scaffolding and the repo-wide checks
+.dockerignore                   context is the repo root, so this lives here
 .github/workflows/
   mod-<app>-<modname>.yml       one per mod; carries that mod's paths filter
   _mod-ci.yml                   reusable; all the per-mod logic lives here once
   repo.yml                      repo-wide checks, always runs
 ```
+
+### Sharing code between mods
+
+Each mod is its own single-layer image, so there is no include mechanism: a file
+two mods both need has to reach both images somehow. It lives once under
+`shared/`, and the **build context is the repo root** rather than the mod
+directory, which is what makes it reachable.
+
+The single-layer rule still holds, because the assembly happens in a stage:
+
+```dockerfile
+FROM scratch AS assemble
+COPY mods/<app>/<mod>/root/ /
+COPY shared/<name>/ /usr/local/lib/<name>/
+
+FROM scratch
+COPY --from=assemble / /        # one COPY in the final stage, one layer
+```
+
+A mod that shares nothing needs no assembly stage — a single
+`COPY mods/<app>/<mod>/root/ /` is still one layer, and that is what
+`template/` scaffolds.
+
+Two things follow, both enforced by `ci/check-shared-files.sh` from `repo.yml`:
+
+- **A mod using `shared/<name>` must add `'shared/<name>/**'` to its workflow's
+  `paths:` filter.** Per-mod workflows are gated on their own directory, so
+  without it a change to the shared code would alter that mod's image without
+  running its tests or its build — the same silent failure as having no workflow.
+- **The nightly pin must cover it too.** That pin is content-addressed, and
+  `ci/mod-inputs.sh` derives the hash from the mod directory *plus* every
+  `shared/` directory the Dockerfile copies. Hashing the mod directory alone
+  would make a shared-code change produce a different image under a pin that
+  already exists, so the publish would be skipped — silently, and every night.
 
 **The two directory levels are the single source of truth.** A mod at
 `mods/<app>/<modname>` is published as `ghcr.io/<owner>/<app>-<modname>` and its

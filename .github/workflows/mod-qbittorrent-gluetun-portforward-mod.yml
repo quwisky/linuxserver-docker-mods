@@ -23,11 +23,13 @@ on:
     branches: ['**']
     paths:
       - 'mods/qbittorrent/gluetun-portforward-mod/**'
+      - 'shared/mod-gluetun-portforward/**'
       - '.github/workflows/mod-qbittorrent-gluetun-portforward-mod.yml'
       - '.github/workflows/_mod-ci.yml'
   pull_request:
     paths:
       - 'mods/qbittorrent/gluetun-portforward-mod/**'
+      - 'shared/mod-gluetun-portforward/**'
       - '.github/workflows/mod-qbittorrent-gluetun-portforward-mod.yml'
       - '.github/workflows/_mod-ci.yml'
   schedule:
