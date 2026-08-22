@@ -367,9 +367,33 @@ the dropdown and `main.html` for the nightly banner. With `DOCS_CHANNEL` unset
 the banner renders nothing and the dropdown ticks Stable — which is what you
 want in a clone.
 
-**Before the first deploy**, set **Settings → Pages → Source** to **GitHub
-Actions**. Until that is done the deploy step fails in a way that reads like a
-workflow bug rather than a one-time setting.
+### Two one-time settings
+
+Both fail in ways that read like a workflow bug rather than a setting, so they
+are worth doing before the first deploy rather than diagnosing afterwards.
+
+1. **Settings → Pages → Source** must be **GitHub Actions**. Until it is,
+   `deploy-pages` fails with a "Pages site not found"-style error.
+2. **Settings → Environments → `github-pages` → Deployment branches** must allow
+   **`develop`** as well as `master`. GitHub restricts that environment to the
+   default branch by default, so a push to `develop` builds both channels
+   perfectly, uploads the artifact, and then fails on the last step with:
+
+   ```
+   Branch "develop" is not allowed to deploy to github-pages
+   due to environment protection rules.
+   ```
+
+   Either add it in the UI, or:
+
+   ```bash
+   gh api --method POST \
+     repos/<owner>/<repo>/environments/github-pages/deployment-branch-policies \
+     -f name='develop' -f type='branch'
+   ```
+
+   This is what lets a change on `develop` reach `/nightly/` without waiting for
+   a push to `master` — which is the entire point of having the channel.
 
 ## Testing
 

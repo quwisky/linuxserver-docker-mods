@@ -22,9 +22,16 @@ name: Docs
 # branches, not by the ref that triggered the run. Dispatching from a feature
 # branch validates that branch and publishes nothing from it.
 #
-# BEFORE THE FIRST RUN: set Settings -> Pages -> Source to "GitHub Actions".
-# Without that, deploy-pages fails with a "Pages site not found"-style error that
-# reads like a workflow bug rather than a one-time setting.
+# BEFORE THE FIRST RUN, two settings, both of which fail like workflow bugs:
+#
+#   1. Settings -> Pages -> Source must be "GitHub Actions", or deploy-pages
+#      fails with a "Pages site not found"-style error.
+#   2. Settings -> Environments -> github-pages -> Deployment branches must
+#      allow `develop` as well as `master`. That environment is restricted to
+#      the default branch by default, so a push to develop builds both channels,
+#      uploads the artifact, and then fails on the deploy step alone with
+#      "Branch develop is not allowed to deploy to github-pages due to
+#      environment protection rules". See the README.
 
 on:
   push:
