@@ -276,9 +276,50 @@ template is not built by anything, so it would otherwise rot unnoticed.
 
 ## Documentation
 
-The site at
-[quwisky.github.io/linuxserver-docker-mods](https://quwisky.github.io/linuxserver-docker-mods/)
-is built with MkDocs Material and deployed to GitHub Pages from `master`.
+The site is built with MkDocs Material and deployed to GitHub Pages in two
+channels, matching the image tags:
+
+| Site | Built from | Describes |
+| --- | --- | --- |
+| [quwisky.github.io/linuxserver-docker-mods](https://quwisky.github.io/linuxserver-docker-mods/) | `master` | the `:latest` images |
+| [.../nightly/](https://quwisky.github.io/linuxserver-docker-mods/nightly/) | `develop` | the `:nightly` images |
+
+Every page of both sites carries a **channel dropdown in the header**, beside
+the palette toggle, with the channel you are on ticked and the other one a link.
+The nightly site additionally shows a banner, since a dropdown states which
+channel you are on only quietly. Its "view on GitHub" links point at `develop`
+rather than `master`, so a nightly page links to the code it actually documents.
+
+The dropdown is not Material's built-in version selector. That one is driven by
+`mike` and fetches `versions.json` relative to `site_url`, which assumes every
+channel sits in a subdirectory of its own — stable is served at the root here,
+so the fetch would climb out of this Pages site entirely. Both URLs are known at
+build time instead, so `overrides/partials/alternate.html` renders the entries
+directly: no JavaScript, no extra request, and no restructuring of a published
+URL people have already linked to.
+
+That file replaces Material's **language** selector, which is what puts a
+dropdown in that spot. The site is single-language, so the slot is free; the
+override drops the `hreflang` the original emits, because telling a crawler that
+stable and nightly are language variants of one another would be a lie. Material
+still supplies everything around it, including the `.md-select` CSS that opens
+the menu on hover and on keyboard focus.
+
+**Pages allows exactly one deployment per repository**, so the two are not
+deployed independently: every run of the docs workflow rebuilds *both* branches
+into one tree and uploads it as a single artifact. A push to `develop` therefore
+checks `master` out as well, and vice versa. The practical consequences are that
+a deploy always publishes both channels as they stand at that moment, and that
+`.github/workflows/docs.yml` has to exist on **both** branches — a push to
+`master` running an older copy of it would publish a site with no `/nightly/`
+until the next push to `develop` restored it.
+
+If `develop` does not exist, the stable site is published on its own and the
+workflow says so once as a notice. If `develop` exists but does not build,
+`/nightly/` is replaced by a short page saying so and the stable site is
+published anyway — `develop` is the integration branch and is allowed to be
+briefly broken; withholding a good stable site because of it would be the wrong
+way round.
 
 There is no `docs/` directory in the repo. `ci/build-docs.sh` generates one from
 the READMEs — this file becomes the home page, and each `mods/<app>/<mod>/README.md`
@@ -303,6 +344,21 @@ mkdocs serve            # http://127.0.0.1:8000
 `mkdocs build --strict` is what CI runs; `--strict` promotes warnings to errors,
 which is what catches a link the generator failed to rewrite. Adding a mod needs
 no docs change — the page and its nav entry appear from the directory tree.
+
+To preview what the nightly site looks like, set the same three variables the
+workflow does. They reach `mkdocs.yml` through its `!ENV` tags, and unset —
+which is every ordinary local build — they give the stable values:
+
+```bash
+DOCS_CHANNEL=nightly DOCS_SOURCE_BRANCH=develop \
+  SITE_NAME='LinuxServer Docker Mods (nightly)' \
+  ci/build-docs.sh && mkdocs serve
+```
+
+`overrides/` holds the repo's only two templates: `partials/alternate.html` for
+the dropdown and `main.html` for the nightly banner. With `DOCS_CHANNEL` unset
+the banner renders nothing and the dropdown ticks Stable — which is what you
+want in a clone.
 
 **Before the first deploy**, set **Settings → Pages → Source** to **GitHub
 Actions**. Until that is done the deploy step fails in a way that reads like a
