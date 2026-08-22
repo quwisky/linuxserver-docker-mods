@@ -17,7 +17,25 @@ numbered. See [Release channels](README.md#release-channels).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **A nightly documentation channel.** The site now publishes twice: the stable
+  docs from `master` at the usual URL, describing the `:latest` images, and the
+  nightly docs from `develop` under
+  [`/nightly/`](https://quwisky.github.io/linuxserver-docker-mods/nightly/),
+  describing `:nightly`. Every page of both sites carries a channel dropdown in
+  the header with the current one ticked, the nightly site adds a banner, and
+  its "view on GitHub" links point at `develop`.
+
+  Reading instructions from `develop` while running `:latest` was previously
+  impossible to notice — the two were the same site.
+
+  GitHub Pages allows one deployment per repository, so the channels are not
+  published independently: each run rebuilds both branches into a single tree
+  and uploads one artifact. A push to either branch therefore refreshes both,
+  and `docs.yml` has to be present on both for that to keep working. A
+  `develop` that does not build costs only `/nightly/`, which is replaced by a
+  page saying so; the stable site is published regardless.
 
 ## [2026-08-22]
 

@@ -11,6 +11,7 @@ docs
 site
 ci
 template
+overrides
 *.md
 **/test
 **/.DS_Store

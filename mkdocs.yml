@@ -1,6 +1,12 @@
-site_name: LinuxServer Docker Mods
+# Two channels are published from one GitHub Pages deployment: the stable site
+# from master at the root, and the nightly site from develop under /nightly/.
+# These three are the only things that differ between them, so they come from
+# the environment rather than from a second config file that would drift.
+# Unset -- which is every local build and every stable build -- gives the values
+# below verbatim.
+site_name: !ENV [SITE_NAME, 'LinuxServer Docker Mods']
 site_description: Docker Mods for LinuxServer.io containers, grouped by application.
-site_url: https://quwisky.github.io/linuxserver-docker-mods/
+site_url: !ENV [SITE_URL, 'https://quwisky.github.io/linuxserver-docker-mods/']
 repo_url: https://github.com/quwisky/linuxserver-docker-mods
 repo_name: quwisky/linuxserver-docker-mods
 edit_uri: ""
@@ -15,8 +21,15 @@ docs_dir: docs
 
 theme:
   name: material
+  # overrides/ holds the channel dropdown (partials/alternate.html) and the
+  # nightly-only banner (main.html). With DOCS_CHANNEL unset the banner renders
+  # nothing and the dropdown marks Stable as current.
+  custom_dir: overrides
   icon:
     repo: fontawesome/brands/github
+    # The channel dropdown's button. Material defaults this to a translate icon,
+    # which belongs to the language selector this replaces.
+    alternate: material/source-branch
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -64,6 +77,24 @@ plugins:
   - search
 
 extra:
+  # "stable" or "nightly" -- see overrides/main.html.
+  channel: !ENV [DOCS_CHANNEL, 'stable']
+  stable_url: https://quwisky.github.io/linuxserver-docker-mods/
+
+  # The header dropdown. `alternate` is Material's LANGUAGE selector key, and
+  # this site is single-language -- overrides/partials/alternate.html replaces
+  # the partial that renders it, so the slot carries channels instead. Both
+  # links are absolute and known at build time, which is why this needs no
+  # versions.json fetch: Material's own version selector would look for one at
+  # ../versions.json, i.e. above the root of this Pages site, because the stable
+  # channel is served AT the root rather than in a subdirectory of its own.
+  alternate:
+    - name: Stable
+      link: https://quwisky.github.io/linuxserver-docker-mods/
+      channel: stable
+    - name: Nightly
+      link: https://quwisky.github.io/linuxserver-docker-mods/nightly/
+      channel: nightly
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/quwisky/linuxserver-docker-mods

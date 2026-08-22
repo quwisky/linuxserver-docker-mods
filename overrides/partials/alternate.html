@@ -1,0 +1,48 @@
+{#-
+  The documentation channel selector, in the header.
+
+  This REPLACES Material's language selector (partials/alternate.html), which is
+  what puts a dropdown in that spot and is fed from config.extra.alternate. The
+  site is single-language and always will be, so the slot is free; the entries
+  are channels rather than languages, and the markup below drops the `hreflang`
+  the original emits -- telling a crawler that stable and nightly are language
+  variants of one another would be a lie with SEO consequences.
+
+  Overriding this partial rather than partials/header.html is deliberate. Both
+  are marked "automatically generated - do not edit" upstream, so both go stale
+  on a Material upgrade -- but this one is 22 lines whose behaviour is entirely
+  replaced, where a copied header silently loses whatever Material adds to it.
+  Everything around the dropdown, and the .md-select CSS that opens it on hover
+  and on :focus-within with no JavaScript, still comes from the theme.
+-#}
+<div class="md-header__option">
+  <div class="md-select">
+    {% set icon = config.theme.icon.alternate or "material/source-branch" %}
+    <button class="md-header__button md-icon" aria-label="Select documentation channel">
+      {% include ".icons/" ~ icon ~ ".svg" %}
+    </button>
+    <div class="md-select__inner">
+      <ul class="md-select__list">
+        {% for alt in config.extra.alternate %}
+          {% set current = alt.channel == config.extra.channel %}
+          {#-
+            One line on purpose: the workflow asserts which entry is marked
+            current, and a multi-line anchor makes that a fragile grep.
+
+            No `| url` filter, unlike the partial this replaces: both links are
+            absolute, and MkDocs' url filter passes an absolute URL through
+            unchanged. A RELATIVE entry in extra.alternate would therefore not
+            be resolved -- keep them absolute.
+
+            `| e` because MkDocs builds its Jinja environment without
+            autoescape. Nothing untrusted reaches these values, but an ampersand
+            in a channel name should not be able to emit broken markup.
+          -#}
+          <li class="md-select__item">
+            <a href="{{ alt.link | e }}" class="md-select__link{% if current %} md-channel--current{% endif %}"{% if current %} aria-current="true"{% endif %}>{{ alt.name | e }}</a>
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+</div>
