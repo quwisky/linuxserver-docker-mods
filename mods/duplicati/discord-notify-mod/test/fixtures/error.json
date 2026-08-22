@@ -1,0 +1,49 @@
+{
+  "DeletedFiles": 0,
+  "DeletedFolders": 0,
+  "ModifiedFiles": 0,
+  "ExaminedFiles": 0,
+  "OpenedFiles": 0,
+  "AddedFiles": 0,
+  "SizeOfExaminedFiles": 0,
+  "NotProcessedFiles": 0,
+  "FilesWithError": 0,
+  "PartialBackup": true,
+  "Dryrun": false,
+  "MainOperation": "Backup",
+  "ParsedResult": "Fatal",
+  "Interrupted": false,
+  "Version": "2.2.0.1 (2.2.0.1_stable_2026-01-14)",
+  "BeginTime": "2026-08-22T02:00:00.0000000Z",
+  "EndTime": "2026-08-22T02:00:09.0000000Z",
+  "Duration": "00:00:09.4410000",
+  "MessagesActualLength": 4,
+  "WarningsActualLength": 1,
+  "ErrorsActualLength": 2,
+  "Messages": [],
+  "Warnings": [
+    "2026-08-22 02:00:02 +02 - [Warning-Duplicati.Library.Main.Controller-MissingRemoteFile]: remote file duplicati-20260821T013000Z.dlist.zip.aes is listed as Uploaded with size 0"
+  ],
+  "Errors": [
+    "2026-08-22 02:00:08 +02 - [Error-Duplicati.Library.Main.Operation.BackupHandler-FatalError]: Fatal error\nAmazon.S3.AmazonS3Exception: The AWS Access Key Id you provided does not exist in our records.\n   at Amazon.Runtime.Internal.HttpErrorResponseExceptionHandler.HandleExceptionStream()\n   at Duplicati.Library.Backend.S3.S3Wrapper.ListBucket(String bucketName, String prefix)",
+    "2026-08-22 02:00:09 +02 - [Error-Duplicati.Library.Main.Controller-FailedOperation]: The operation Backup has failed with error: The AWS Access Key Id you provided does not exist in our records."
+  ],
+  "BackendStatistics": {
+    "RemoteCalls": 3,
+    "BytesUploaded": 0,
+    "BytesDownloaded": 0,
+    "FilesUploaded": 0,
+    "FilesDownloaded": 0,
+    "FilesDeleted": 0,
+    "RetryAttempts": 5,
+    "KnownFileCount": 0,
+    "KnownFileSize": 0,
+    "BackupListCount": 0,
+    "AssignedQuotaSpace": -1,
+    "ReportedQuotaError": true,
+    "ReportedQuotaWarning": false,
+    "MainOperation": "Backup",
+    "ParsedResult": "Fatal",
+    "Duration": "00:00:00"
+  }
+}

@@ -1,0 +1,13 @@
+# A webhook that was deleted in Discord, which is what a 404 here really means.
+# The mod must say so in a way someone can act on, and must still exit 0.
+:8080 {
+	log {
+		output stdout
+		format json
+	}
+
+	handle {
+		header Content-Type application/json
+		respond `{"message":"Unknown Webhook","code":10015}` 404
+	}
+}

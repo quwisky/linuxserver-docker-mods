@@ -1,0 +1,22 @@
+# Permanently rate limited. Deliberately stateless: the mod retries a 429 exactly
+# once, so an always-429 stub proves both halves -- that the retry happens, and
+# that it happens only once instead of looping until Duplicati kills the script.
+#
+# retry_after is a float, as it has been since API v8, so the parser has to round
+# it rather than feed "1.75" to sleep.
+:8080 {
+	log {
+		output stdout
+		format json
+	}
+
+	handle /api/webhooks/* {
+		log_append body {http.request.body}
+		header Content-Type application/json
+		respond `{"message":"You are being rate limited.","retry_after":1.75,"global":false}` 429
+	}
+
+	handle {
+		respond "Not Found" 404
+	}
+}

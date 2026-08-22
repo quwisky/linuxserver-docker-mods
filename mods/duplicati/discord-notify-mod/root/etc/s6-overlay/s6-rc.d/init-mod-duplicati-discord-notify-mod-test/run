@@ -1,0 +1,55 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+#
+# The optional startup test, DISCORD_TEST_ON_START.
+#
+# A SECOND oneshot, and it has to be: this one depends on
+# init-mods-package-install, where the first one is a dependency OF it. That
+# ordering is the whole reason the split exists -- the first oneshot asks for jq
+# and curl, the framework installs them, and only then can this one use them.
+# Running the test from the first oneshot would work on today's Duplicati image,
+# which already ships both, and fail on any image that does not, at exactly the
+# moment someone is trying to find out whether their webhook works.
+#
+# Never exits non-zero. A oneshot that fails can block container startup, and a
+# Discord webhook being unreachable must not stop Duplicati from running -- the
+# same rule the notification script itself follows.
+#
+# Nothing depends on this oneshot, deliberately. Registering it in
+# init-mods-end/dependencies.d/ would make the whole container wait for an HTTP
+# request before Duplicati starts, which costs DISCORD_TIMEOUT seconds of
+# start-up every time Discord is unreachable. A notification is not a
+# prerequisite for anything; being ordered after init-mods-package-install is
+# all this needs.
+
+MOD="discord-notify"
+P="[mod-${MOD}]"
+SCRIPT_PATH="/usr/local/bin/duplicati-discord.sh"
+
+# Same truthy set the rest of the repo's mods use.
+if [[ ! ${DISCORD_TEST_ON_START,,} =~ ^(1|true|yes|on|enable|enabled)$ ]]; then
+    exit 0
+fi
+
+echo "${P} **** DISCORD_TEST_ON_START is set; sending a test notification ****"
+
+if [[ ! -x ${SCRIPT_PATH} ]]; then
+    echo "${P} **** ${SCRIPT_PATH} is missing or not executable; cannot test ****"
+    exit 0
+fi
+
+# Drop to the same identity Duplicati will invoke the script as. Without this the
+# test runs as root, which can read a /config webhook file that the app user
+# cannot -- so it would pass while the real notification later fails, which is
+# the one outcome a test like this must not produce.
+#
+# The guard matters: under LSIO_NON_ROOT_USER there is no `abc` and s6-setuidgid
+# would fail. This is the only place the mod needs it; the notification script
+# itself is invoked by Duplicati, already as the right user.
+if [[ -z ${LSIO_NON_ROOT_USER} ]] && command -v s6-setuidgid >/dev/null 2>&1; then
+    s6-setuidgid abc "${SCRIPT_PATH}" --test || true
+else
+    "${SCRIPT_PATH}" --test || true
+fi
+
+exit 0

@@ -1,0 +1,64 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+#
+# Oneshot, run once at container start.
+#
+# Two jobs, neither of which needs the notification script to run:
+#
+#  1. Ask the framework for jq and curl. Duplicati's image is Ubuntu-based and
+#     ships neither reliably, and a mod must never call apt-get itself -- the
+#     batched install is what keeps a container with several mods to one apt
+#     transaction. This oneshot is registered in
+#     init-mods-package-install/dependencies.d/, which is what guarantees the
+#     append lands BEFORE the install runs; depending on init-mods alone would
+#     leave the two free to run in either order.
+#
+#  2. Print the one thing the mod cannot do for itself. Duplicati keeps its
+#     default options in Duplicati-server.sqlite, not in a config file or an
+#     environment variable, so --run-script-after has to be set once by hand in
+#     the web UI. Writing to that database underneath a running Duplicati is not
+#     something a mod has any business doing.
+#
+# Nothing here needs jq, so there is no second oneshot: the script that does
+# need it is invoked by Duplicati long after the install has finished.
+
+MOD="discord-notify"
+P="[mod-${MOD}]"
+SCRIPT_PATH="/usr/local/bin/duplicati-discord.sh"
+
+echo "${P} **** starting ****"
+
+for pkg in curl jq; do
+    if ! command -v "${pkg}" >/dev/null 2>&1; then
+        echo "${P} adding ${pkg} to the package install list"
+        # One list, two package managers: the image is Ubuntu today, but the
+        # guard costs nothing and survives a rebase onto Alpine.
+        if [[ -f /usr/bin/apt ]] || [[ -f /sbin/apk ]]; then
+            echo "${pkg}" >>/mod-repo-packages-to-install.list
+        fi
+    fi
+done
+
+# chmod rather than trusting the layer: /docker-mods extracts the tar as-is, so
+# the bit set in git is what arrives -- but a mod that silently ships a
+# non-executable script fails in a way nobody can diagnose from Duplicati's log.
+if [[ -f ${SCRIPT_PATH} ]]; then
+    chmod 0755 "${SCRIPT_PATH}"
+else
+    echo "${P} **** ${SCRIPT_PATH} is missing; the mod layer did not extract cleanly ****"
+fi
+
+echo "${P} **** one manual step is still needed ****"
+echo "${P}   Duplicati stores its default options in Duplicati-server.sqlite, so a mod"
+echo "${P}   cannot register itself. Open the web UI and add this under"
+echo "${P}   Settings -> Default options:"
+echo "${P}"
+echo "${P}     --run-script-after=${SCRIPT_PATH}"
+echo "${P}"
+echo "${P}   Optional, and worth having -- it makes the embed's statistics richer:"
+echo "${P}"
+echo "${P}     --run-script-result-output-format=Json"
+echo "${P}"
+echo "${P}   Then set DISCORD_WEBHOOK_URL (or DISCORD_WEBHOOK_URL_FILE, or write the"
+echo "${P}   URL to /config/discord-webhook.url). Until one of those is set the"
+echo "${P}   script runs and sends nothing."
