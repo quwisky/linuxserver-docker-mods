@@ -38,7 +38,23 @@ FROM ${MOD_IMAGE} AS mod
 FROM lscr.io/linuxserver/plex:latest
 COPY --from=mod / /
 EOF
-if ! docker build -q -t "${PLEX_IMAGE}" "${WORK}" >"${WORK}/plex-build.log" 2>&1; then
+
+# lscr.io occasionally throttles the shared GitHub-hosted runner address. Keep
+# an actual build or image error fatal, but give a transient registry response a
+# few bounded chances to clear before failing the smoke test.
+plex_built=0
+for attempt in 1 2 3 4; do
+    if docker build -q -t "${PLEX_IMAGE}" "${WORK}" \
+        >>"${WORK}/plex-build.log" 2>&1; then
+        plex_built=1
+        break
+    fi
+    if ((attempt < 4)); then
+        echo "Plex integration image build failed (attempt ${attempt}/4); retrying" >&2
+        sleep $((attempt * 5))
+    fi
+done
+if ((!plex_built)); then
     cat "${WORK}/plex-build.log" >&2
     fail "Plex integration image did not build"
 fi
