@@ -16,8 +16,12 @@ FAILED=0
 # Invoked indirectly by the EXIT trap below.
 # shellcheck disable=SC2329
 cleanup() {
+    # ShellCheck 0.9 reports trap callbacks as unreachable (SC2317).
+    # shellcheck disable=SC2317
     docker rm -f "${NAME}" >/dev/null 2>&1
+    # shellcheck disable=SC2317
     docker image rm -f "${IMAGE}" >/dev/null 2>&1
+    # shellcheck disable=SC2317
     rm -rf "${WORK}"
 }
 trap cleanup EXIT
