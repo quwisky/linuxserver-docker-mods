@@ -32,6 +32,16 @@ jobs:
         # mod's workflow is exactly what would not run.
         run: ci/check-shared-files.sh
 
+      - name: docs generation cannot replace tracked source
+        run: |
+          log="${RUNNER_TEMP}/build-docs-guard.log"
+          if OUT=mods ci/build-docs.sh >"${log}" 2>&1; then
+            echo "::error::ci/build-docs.sh accepted tracked mods/ as its destructive output target"
+            exit 1
+          fi
+          grep -qF 'refusing to replace an existing directory not created by build-docs' "${log}"
+          git diff --exit-code -- mods
+
       - name: shellcheck the shared tooling, shared/ and the template
         # Per-mod scripts are checked by that mod's own workflow; these belong to
         # no mod, so nothing else would ever look at them. shared/ is in the list
@@ -52,7 +62,10 @@ jobs:
         run: |
           scratch="$(mktemp -d)"
           export MODS_DIR="${scratch}/mods" WF_DIR="${scratch}/wf"
-          ci/new-mod.sh imgname checkme
+          # Secure developer and CI environments commonly use 0077. The
+          # scaffold must preserve the template's executable/readable modes
+          # rather than letting an in-place editor filter them through umask.
+          (umask 0077; ci/new-mod.sh imgname checkme)
           d="${MODS_DIR}/imgname/checkme"
           rc=0
           # Point the real checkers at the scaffold. Without this the generated

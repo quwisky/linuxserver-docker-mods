@@ -19,6 +19,16 @@ numbered. See [Release channels](README.md#release-channels).
 
 ### Fixed
 
+- Repository tooling now refuses to replace existing non-generated or
+  out-of-repository paths during documentation generation, preserves template
+  file modes even under a restrictive umask, verifies every architecture below
+  a published image index, and omits the nonexistent immutable pin from
+  custom-tag build summaries.
+- **plex-vaapi-amdgpu-mod** — document host numeric DRM group IDs in the Compose
+  example. Container-local `video` and `render` names can map to different GIDs
+  and leave Plex unable to open a mounted render node.
+- **duplicati-discord-notify-mod** — consistently document that failures and
+  debug payloads go to stdout, as required to avoid Duplicati script warnings.
 - **plex-vaapi-amdgpu-mod** — create and repair Plex cache directories as the
   configured application user. On a fresh `/config`, the root-run initializer
   previously created `Plex Media Server` as `root:root`, causing Plex to refuse
@@ -84,7 +94,7 @@ numbered. See [Release channels](README.md#release-channels).
   `--run-script-after` as the operation having failed, and says so everywhere
   else you have notifications configured. The script therefore exits 0
   unconditionally; a dead webhook, a 404, a rate limit and a DNS failure each
-  produce a line on stderr and nothing more. The smoke test asserts that against
+  produce a line on stdout and nothing more. The smoke test asserts that against
   all four.
 
   Without `jq` it degrades rather than breaks: the payload becomes a flat

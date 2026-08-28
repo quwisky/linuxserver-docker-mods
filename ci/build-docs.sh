@@ -25,8 +25,33 @@ REPO_URL="${REPO_URL:-https://github.com/quwisky/linuxserver-docker-mods}"
 BRANCH="${DOCS_SOURCE_BRANCH:-master}"
 BLOB="${REPO_URL}/blob/${BRANCH}"
 
-rm -rf "${OUT}"
-mkdir -p "${OUT}"
+# OUT is configurable for local previews, but it is also recursively replaced.
+# Keep that deletion inside this checkout and away from source directories: a
+# typo such as OUT=mods must fail before it destroys the source tree.
+OUT_ABS="$(realpath -m -- "${OUT}")"
+case "${OUT_ABS}" in
+    "${REPO}"/*) ;;
+    *)
+        echo "refusing to replace docs output outside the repository: ${OUT_ABS}" >&2
+        exit 1
+        ;;
+esac
+OUT_REL="${OUT_ABS#"${REPO}"/}"
+MARKER=.generated-by-build-docs
+# docs/ is the established generated target and predates the marker. Any other
+# existing path must prove that an earlier successful invocation created it;
+# otherwise OUT=mods (or another source directory) is a destructive typo.
+if [[ -e ${OUT_ABS} && ${OUT_ABS} != "${REPO}/docs" && ! -f ${OUT_ABS}/${MARKER} ]]; then
+    echo "refusing to replace an existing directory not created by build-docs: ${OUT_REL}" >&2
+    exit 1
+fi
+
+rm -rf -- "${OUT_ABS}"
+mkdir -p "${OUT_ABS}"
+touch "${OUT_ABS}/${MARKER}"
+# Use the canonical path from here on, so a symlink or `..` component cannot
+# make the validated target differ from the directory subsequently written.
+OUT="${OUT_ABS}"
 
 # --- root README -> the site's home page ---------------------------------
 cp README.md "${OUT}/index.md"

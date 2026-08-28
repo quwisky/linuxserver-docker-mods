@@ -97,6 +97,17 @@ mod's exact use case.
 
 ## Quick start
 
+First export the numeric groups that own the host's DRM devices. Container group
+names are not portable here: Compose resolves `video` and `render` inside the
+image, while the mounted device nodes keep their host GIDs.
+
+```bash
+export VIDEO_GID="$(stat -c '%g' /dev/dri/card0)"
+export RENDER_GID="$(stat -c '%g' /dev/dri/renderD128)"
+```
+
+If the host has no `renderD*` node, omit `RENDER_GID` and its `group_add` entry.
+
 ```yaml
 services:
   plex:
@@ -106,10 +117,9 @@ services:
       # Required. Without this there is no GPU inside the container at all.
       - /dev/dri:/dev/dri
     group_add:
-      # The container user must be able to open the DRM nodes. `render` does not
-      # exist on every host; drop it if yours has no such group.
-      - video
-      - render
+      # Numeric host GIDs are required; same-named container groups can differ.
+      - "${VIDEO_GID}"
+      - "${RENDER_GID}"
     environment:
       - PUID=1000
       - PGID=1000
@@ -222,7 +232,7 @@ transcode shows `(hw)` — for example `Video: HEVC → H264 (hw)`.
 | `WARNING: amdgpu.ids not found at /usr/share/libdrm/amdgpu.ids` | The mod layer did not extract properly. Recreate the container so `/docker-mods` re-applies it. |
 | `Transcoder wrapper already exists` | Normal on any container that has started before. |
 | `libva: radeonsi_drv_video.so init failed` *after* installing the mod | The wrappers are not being used, or the mod was not applied. See the two checks below. |
-| `Permission denied` opening `/dev/dri/renderD128` | The device is passed through but the container user is not in the owning group. Add `group_add: [video, render]`. |
+| `Permission denied` opening `/dev/dri/renderD128` | The device is passed through but the container user lacks its host GID. Re-run the `stat` commands in Quick start and use those numeric values under `group_add`. |
 | `Unknown AMD (XXXX)` in Plex | Cosmetic. Plex has no marketing name for the card; transcoding is unaffected. |
 | `amdgpu: os_same_file_description couldn't determine if two DRM fds…` | A harmless Mesa warning. |
 | `Critical: libusb_init failed` | Unrelated to transcoding — Plex itself says to ignore it. |

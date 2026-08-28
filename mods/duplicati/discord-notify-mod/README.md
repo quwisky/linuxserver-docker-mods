@@ -83,7 +83,7 @@ Duplicati treats a non-zero exit from `--run-script-after` as the operation
 having failed, and reports it that way everywhere else you have notifications
 configured. So this script exits 0 unconditionally — a webhook that is down, a
 malformed result file, a DNS failure and an outright bug in the script all
-produce a message on stderr and a zero exit.
+produce a message on stdout and a zero exit.
 
 ## Requirements
 
@@ -188,7 +188,7 @@ you end up debugging the wrong thing.
 | `DISCORD_LOG_LINES` | `10` | How many error and warning lines to quote. Capped at 50. |
 | `DISCORD_TIMEOUT` | `20` | curl's timeout, in seconds. |
 | `DISCORD_TEST_ON_START` | `false` | Post a test message once, at container start, to prove the webhook works before you run a backup. |
-| `DISCORD_DEBUG` | `false` | Print the assembled payload to stderr, where Duplicati's log picks it up. |
+| `DISCORD_DEBUG` | `false` | Print the assembled payload to stdout, where Duplicati logs it without raising a script warning. |
 
 LinuxServer's `FILE__` convention works for any of these too, e.g.
 `FILE__DISCORD_WEBHOOK_URL=/run/secrets/hook` — the baseimage materialises those
