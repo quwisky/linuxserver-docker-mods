@@ -66,7 +66,10 @@ if [[ -d ${MODS_DIR} ]]; then
 fi
 
 mkdir -p "${MODS_DIR}/${APP}" "${WF_DIR}"
-cp -R template "${DIR}"
+# -p is load-bearing: without it cp filters the template modes through the
+# caller's umask before substitutions even begin. A 0077 environment would turn
+# every 0755 s6 script into a root-only 0700 file.
+cp -Rp template "${DIR}"
 
 # Rename the placeholder service directories, deepest first so the parents are
 # still where find left them.
@@ -86,7 +89,12 @@ done < <(find "${DIR}" -depth -name '*imagename-modname*')
 # `@@` cannot occur in the template, and the validator above forbids it in the
 # values, so neither phase can feed the other.
 while IFS= read -r f; do
-    sed -i.bak \
+    # Write back through the existing inode. `sed -i` replaces the file with a
+    # temporary one whose mode is filtered through the caller's umask; under a
+    # common restrictive 0077 umask that turns the template's 0755 s6 scripts
+    # into 0700 files and the generated mod fails its own permission check.
+    tmp="$(mktemp "${TMPDIR:-/tmp}/new-mod.XXXXXX")"
+    sed \
         -e 's/imagename-modname/@@ID@@/g' \
         -e 's/imagename/@@APP@@/g' \
         -e 's/modname/@@NAME@@/g' \
@@ -94,8 +102,9 @@ while IFS= read -r f; do
         -e "s/@@APP@@/${APP}/g" \
         -e "s/@@NAME@@/${NAME}/g" \
         -e "s/^# Modname /# ${NAME} /" \
-        "${f}"
-    rm -f "${f}.bak"
+        "${f}" >"${tmp}"
+    cat "${tmp}" >"${f}"
+    rm -f "${tmp}"
 done < <(find "${DIR}" -type f)
 
 # Spread the nightly crons out. GitHub queues everything scheduled for the same

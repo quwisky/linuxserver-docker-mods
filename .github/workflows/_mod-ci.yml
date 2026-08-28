@@ -505,10 +505,38 @@ jobs:
               exit 1
             fi
           else
-            echo "index, entries:"
-            jq -r '.manifests[] | "  \(.platform.os)/\(.platform.architecture) \(.digest)"' <<<"${json}"
-            jq -e '[.manifests[] | select(.platform.architecture != "unknown")] | length > 0' >/dev/null <<<"${json}" ||
-              { echo "::error::${MOVING} index has no usable architecture entry"; exit 1; }
+            mapfile -t manifests < <(jq -r \
+              '.manifests[] | select(.platform.architecture != "unknown") | [(.platform.os + "/" + .platform.architecture), .digest] | @tsv' \
+              <<<"${json}")
+            if ((${#manifests[@]} == 0)); then
+              echo "::error::${MOVING} index has no usable architecture entry"
+              exit 1
+            fi
+
+            echo "index, verified entries:"
+            for entry in "${manifests[@]}"; do
+              platform="${entry%%$'\t'*}"
+              digest="${entry#*$'\t'}"
+              child_body="$(curl -sS -w '\n%{http_code}' \
+                --header "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+                --header "Accept: application/vnd.oci.image.manifest.v1+json" \
+                --header "Authorization: Bearer ${token}" \
+                "https://ghcr.io/v2/${repo}/manifests/${digest}")"
+              child_code="${child_body##*$'\n'}"
+              child_json="${child_body%$'\n'*}"
+
+              if [[ ${child_code} != 200 ]]; then
+                echo "::error title=Architecture is unreadable::${MOVING} ${platform} returned HTTP ${child_code}."
+                echo "${child_json}"
+                exit 1
+              fi
+              child_layers="$(jq -r '.layers | length' <<<"${child_json}")"
+              if [[ ${child_layers} != 1 ]]; then
+                echo "::error::${MOVING} ${platform} has ${child_layers} layers; /docker-mods only extracts the first"
+                exit 1
+              fi
+              echo "  ${platform} ${digest}: 1 layer"
+            done
           fi
           echo "**** ${MOVING} is readable by /docker-mods ****"
 
@@ -528,7 +556,7 @@ jobs:
               echo "Pushed:"
               echo ""
               echo "- \`${MOVING}\`"
-              echo "- \`${PINNED}\`"
+              if [[ -n ${PINNED} ]]; then echo "- \`${PINNED}\`"; fi
             fi
             echo ""
             echo "First publish of a mod? Set the \`${ID}\` **package** to public on the repo's Packages page."
