@@ -274,13 +274,15 @@ they are not obvious and they shape this design:
   `ci/check-mod-workflows.sh` fails on a collision.
 
 The cron runs the full test suite every night even when the mod has not changed
-— the smoke harness pulls `bash:5` and `caddy:2-alpine`, so upstream breakage
-surfaces in CI rather than in someone's container. Only the *publish* is skipped
-when nothing changed, which is what the content-addressed `-nightly-<tree-sha>`
-pin is for: the tag is the git tree hash of `mods/<app>/<mod>`, so unchanged
-content resolves to a tag that already exists and the push is a no-op instead of
-registry churn. That same dedupe is why a push to `develop` that only touched
-the shared CI file does not churn every mod's `:nightly`.
+changed — the smoke harnesses pull their current upstream runtime images,
+including Bash, Caddy and LinuxServer Plex, so upstream breakage surfaces in CI
+rather than in someone's container. Only the *publish* is skipped when nothing
+changed, which is what the content-addressed
+`-nightly-<tree-sha>` pin is for: the tag is a combined content hash of
+`mods/<app>/<mod>` and every `shared/` directory its Dockerfile copies, so
+unchanged inputs resolve to a tag that already exists and the push is a no-op
+instead of registry churn. That same dedupe is why a push to `develop` that only
+touched shared CI does not churn every mod's `:nightly`.
 
 **A push to `develop` publishes `:nightly` immediately**, the same way a push to
 `master` publishes `:latest`. The cron is a backstop for the tests, not the

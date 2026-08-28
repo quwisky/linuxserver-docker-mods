@@ -296,7 +296,8 @@ All paths below are relative to the repo root.
 ```bash
 # amd64 is not optional: the drivers are x86_64 and get linked into Plex's
 # va-dri-linux-x86_64 cache.
-docker build --platform linux/amd64 -t local/vaapi mods/plex/vaapi-amdgpu-mod
+docker build --platform linux/amd64 \
+  -f mods/plex/vaapi-amdgpu-mod/Dockerfile -t local/vaapi .
 ```
 
 Inspect what actually ends up in the layer — it should be the s6 tree,
@@ -315,6 +316,15 @@ A mod must be exactly one layer, because `/docker-mods` only ever pulls
 docker image inspect local/vaapi --format '{{len .RootFS.Layers}}'
 ```
 
+The smoke test builds that layer into the current `linuxserver/plex` image,
+starts Plex with an empty `/config` as `PUID=1000`/`PGID=1000`, checks the Mesa
+dependency closure, and verifies both a fresh setup and repair of directories
+created by an older release with the wrong ownership:
+
+```bash
+bash mods/plex/vaapi-amdgpu-mod/test/smoke.sh
+```
+
 To try it against a real container, point `DOCKER_MODS` at the local tag and
 recreate:
 
@@ -326,6 +336,7 @@ Before pushing:
 
 ```bash
 shellcheck -x mods/plex/vaapi-amdgpu-mod/root/etc/s6-overlay/s6-rc.d/*/run
+bash mods/plex/vaapi-amdgpu-mod/test/smoke.sh
 
 # s6 silently ignores non-executable service scripts, so this must print nothing
 find mods/plex/vaapi-amdgpu-mod \( -name run -o -name finish -o -name check \) \

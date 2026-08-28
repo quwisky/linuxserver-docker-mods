@@ -70,6 +70,12 @@ sed -i.bak -E 's#\]\((\.\./)*(\.github/[^)]+)\)#]('"${BLOB}"'/\2)#g' \
 sed -i.bak -E 's#\]\((\.\./)*((ci|template)/[^)]*)\)#]('"${BLOB}"'/\2)#g' \
     "${OUT}/index.md" "${OUT}"/mods/*/*.md
 
+# A source README is at mods/<app>/<mod>/README.md, so a link to another mod is
+# ../../<app>/<mod>/. Its generated page is one level up from the current page.
+# Keep source links correct on GitHub and translate them for the site here.
+sed -i.bak -E 's#\]\(\.\./\.\./([a-z0-9-]+)/([a-z0-9-]+)/\)#](../\1/\2.md)#g' \
+    "${OUT}"/mods/*/*.md
+
 # Links to CHANGELOG.md resolve to the lower-cased page name on the site.
 sed -i.bak -E 's@\]\(CHANGELOG\.md(#[^)]*)?\)@](changelog.md\1)@g' "${OUT}/index.md"
 sed -i.bak -E 's@\]\((\.\./)*CHANGELOG\.md(#[^)]*)?\)@](../../changelog.md\2)@g' "${OUT}"/mods/*/*.md

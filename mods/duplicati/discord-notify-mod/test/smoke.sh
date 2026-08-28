@@ -410,7 +410,11 @@ eq 'the caller-set DUPLICATI__ variables reached the script' 1 "$(request_count)
 refute "${MODLOG}" 'it never says the event was empty' "event is '', not AFTER"
 # stderr is the half that made Duplicati warn.
 eq 'nothing at all on stderr, even with debug on' 0 "$(wc -c <"${WORK}/err" | tr -d ' ')"
-yes_ 'while stdout carried the debug output' test -s "${WORK}/out"
+if [[ -s ${WORK}/out ]]; then
+    pass 'while stdout carried the debug output'
+else
+    fail 'while stdout carried the debug output' 'stdout was empty'
+fi
 
 say "Scenario 11b: a failing send is still silent on stderr"
 start_stub dupsmoke/discord-404

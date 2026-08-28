@@ -27,10 +27,10 @@ name: Mod CI
 # its own visibility setting -- at the cost of having to make each new one
 # public once, see below.
 #
-# The nightly pin is the git tree hash of `mods/<app>/<mod>` rather than a date or a
-# commit sha, which makes it content-addressed: a night where the mod did not
-# change resolves to a tag that already exists, and the publish is skipped
-# instead of churning the registry with identical images. Tests still run.
+# The nightly pin is a combined content hash of `mods/<app>/<mod>` and every
+# shared/ directory its Dockerfile copies rather than a date or commit sha. A
+# night where no image input changed resolves to a tag that already exists, and
+# the publish is skipped instead of churning the registry. Tests still run.
 
 on:
   workflow_call:

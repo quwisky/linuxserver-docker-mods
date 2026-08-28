@@ -107,7 +107,31 @@ fi
 # ============================================================
 
 PLEX_VA_CACHE="/config/Library/Application Support/Plex Media Server/Cache/va-dri-linux-x86_64"
-mkdir -p "$PLEX_VA_CACHE"
+
+# This oneshot runs as root because it has to replace binaries under /usr/lib,
+# but /config belongs to the runtime `abc` user. Creating this tree as root on a
+# fresh volume leaves "Plex Media Server" root-owned and Plex refuses to start.
+# Create it as abc, then repair the three directories an older version of this
+# mod may already have created with the wrong ownership. Do not recurse through
+# Cache: it can be large, and the mod only owns these directory entries.
+PLEX_DATA_DIR="/config/Library/Application Support/Plex Media Server"
+if id abc >/dev/null 2>&1 && command -v s6-setuidgid >/dev/null 2>&1; then
+    if command -v lsiown >/dev/null 2>&1; then
+        # Repair existing ancestors first. Otherwise abc could not recreate a
+        # deleted child below a root-owned directory left by the old mod.
+        for directory in "$PLEX_DATA_DIR" "$PLEX_DATA_DIR/Cache" "$PLEX_VA_CACHE"; do
+            [ -d "$directory" ] && lsiown abc:abc "$directory"
+        done
+    fi
+    s6-setuidgid abc mkdir -p "$PLEX_VA_CACHE"
+    if command -v lsiown >/dev/null 2>&1; then
+        lsiown abc:abc "$PLEX_VA_CACHE"
+    fi
+else
+    # Defensive fallback for an unexpected base-image layout. linuxserver/plex
+    # provides abc, s6-setuidgid and lsiown before init-mods runs.
+    mkdir -p "$PLEX_VA_CACHE"
+fi
 
 rm -f "$PLEX_VA_CACHE"/*.so* 2>/dev/null
 
