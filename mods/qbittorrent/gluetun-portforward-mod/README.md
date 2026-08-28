@@ -472,7 +472,7 @@ Before pushing:
 ```bash
 shellcheck -x \
   root/etc/s6-overlay/s6-rc.d/svc-mod-qbittorrent-gluetun-portforward-mod/{run,finish} \
-  root/usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh \
+  ../../../shared/mod-gluetun-portforward/netns-watchdog.sh \
   test/run_tests.sh test/smoke.sh
 
 # s6 silently ignores non-executable service scripts, so this must print nothing
@@ -494,7 +494,7 @@ that filter goes missing.
 ## Credits
 
 The gluetun side of this mod shares its logic with
-[plex-gluetun-portforward-mod](../plex/gluetun-portforward-mod.md), and owes the
+[plex-gluetun-portforward-mod](../../plex/gluetun-portforward-mod/), and owes the
 qBittorrent API shape to the example in the
 [gluetun wiki](https://github.com/qdm12/gluetun-wiki/blob/main/setup/advanced/vpn-port-forwarding.md).
 

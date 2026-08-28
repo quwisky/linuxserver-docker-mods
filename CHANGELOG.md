@@ -19,6 +19,13 @@ numbered. See [Release channels](README.md#release-channels).
 
 ### Fixed
 
+- **plex-vaapi-amdgpu-mod** — create and repair Plex cache directories as the
+  configured application user. On a fresh `/config`, the root-run initializer
+  previously created `Plex Media Server` as `root:root`, causing Plex to refuse
+  to start for ordinary `PUID`/`PGID` deployments.
+- Correct local build and lint commands, cross-mod documentation links, and the
+  description of shared inputs in nightly content hashes.
+
 - **duplicati-discord-notify-mod sent nothing at all.** Its script carried
   `#!/usr/bin/with-contenv bash`, and `with-contenv` *replaces* the environment
   with the container's — discarding every `DUPLICATI__` variable Duplicati
@@ -115,7 +122,6 @@ numbered. See [Release channels](README.md#release-channels).
   and `docs.yml` has to be present on both for that to keep working. A
   `develop` that does not build costs only `/nightly/`, which is replaced by a
   page saying so; the stable site is published regardless.
-
 ## [2026-08-22]
 
 ### Added

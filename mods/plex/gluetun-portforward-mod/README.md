@@ -623,7 +623,7 @@ Before pushing:
 ```bash
 shellcheck -x \
   root/etc/s6-overlay/s6-rc.d/svc-mod-plex-gluetun-portforward-mod/{run,finish} \
-  root/usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh \
+  ../../../shared/mod-gluetun-portforward/netns-watchdog.sh \
   test/run_tests.sh test/smoke.sh
 
 # s6 silently ignores non-executable service scripts, so this must print nothing
