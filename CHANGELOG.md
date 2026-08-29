@@ -67,6 +67,28 @@ numbered. See [Release channels](README.md#release-channels).
 
 ### Added
 
+- **universal-gluetun-netns-watchdog-mod** — a standalone version of the
+  fail-safe network-namespace watchdog already shared by the Plex and
+  qBittorrent Gluetun port-forward mods. It works with any current LinuxServer
+  container using `network_mode: service:gluetun` or
+  `network_mode: container:gluetun`.
+
+  When Gluetun restarts, Docker can leave an attached application running in
+  the destroyed namespace with only `lo`, unable to route out and unreachable
+  through the ports now published on Gluetun's replacement namespace. After a
+  startup grace period and four consecutive scans with no non-loopback
+  interface, this mod gracefully halts the application container so its normal
+  restart policy brings it back attached correctly. A VPN reconnect leaves
+  `eth0` present and therefore does not trigger it.
+
+  The standalone interface is `GLUETUN_NETNS_WATCHDOG_*`, isolated from the
+  `GLUETUN_PF_*` variables used by the port-forward mods. It retains the shared
+  helper's fail-open `/sys` handling, dry-run mode, configurable strike and
+  grace thresholds, non-zero exit status, bounded failed-halt attempts, and
+  graceful s6 shutdown. It installs no packages and needs no Docker socket.
+  Recovery requires `restart: unless-stopped` or `restart: on-failure` on the
+  application container.
+
 - **duplicati-discord-notify-mod** — a new mod for `linuxserver/duplicati`,
   published as `ghcr.io/quwisky/duplicati-discord-notify-mod`. Pulling it gets
   you a colour-coded Discord embed after every Duplicati operation instead of

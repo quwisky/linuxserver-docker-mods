@@ -1,0 +1,106 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+#
+# A container with `network_mode: service:gluetun` joins gluetun's network
+# namespace by container ID. If gluetun itself is recreated, Docker leaves this
+# container attached to the destroyed namespace, where only loopback remains.
+# This service notices that exact state and gracefully halts PID 1 so Docker's
+# restart policy can start the container in gluetun's new namespace.
+
+P="[mod-universal-gluetun-netns-watchdog]"
+log() { echo "${P} $*"; }
+loud() { echo "${P} **** $* ****"; }
+falsey() { [[ ${1,,} =~ ^(0|false|no|off|disable|disabled)$ ]]; }
+is_uint() { [[ $1 =~ ^[0-9]+$ ]]; }
+
+WATCHDOG_LIB="${GLUETUN_NETNS_WATCHDOG_LIB:-/usr/local/lib/mod-gluetun-portforward/netns-watchdog.sh}"
+
+HELPER_LOADED=0
+if [[ -r ${WATCHDOG_LIB} ]]; then
+    # shellcheck source-path=SCRIPTDIR
+    # shellcheck source=../../../../../../../../shared/mod-gluetun-portforward/netns-watchdog.sh
+    source "${WATCHDOG_LIB}"
+    HELPER_LOADED=1
+fi
+NETNS_DRY_RUN_ENV_NAME=GLUETUN_NETNS_WATCHDOG_DRY_RUN
+NETNS_GIVEUP_CONTINUATION="The watchdog service stays up but takes no further action."
+
+# Translate the standalone public interface to the shared helper's original
+# names. Assign every value, including empty ones, so a GLUETUN_PF_* variable
+# belonging to a second mod can never configure this service by accident.
+configure() {
+    GLUETUN_PF_NETNS_WATCHDOG="${GLUETUN_NETNS_WATCHDOG_ENABLED:-true}"
+    GLUETUN_PF_NETNS_WATCHDOG_DRY_RUN="${GLUETUN_NETNS_WATCHDOG_DRY_RUN:-false}"
+    GLUETUN_PF_NETNS_WATCHDOG_STRIKES="${GLUETUN_NETNS_WATCHDOG_STRIKES:-4}"
+    GLUETUN_PF_NETNS_WATCHDOG_GRACE="${GLUETUN_NETNS_WATCHDOG_GRACE:-60}"
+    GLUETUN_PF_NETNS_WATCHDOG_EXIT_CODE="${GLUETUN_NETNS_WATCHDOG_EXIT_CODE:-70}"
+    GLUETUN_PF_NETNS_WATCHDOG_MAX_HALTS="${GLUETUN_NETNS_WATCHDOG_MAX_HALTS:-3}"
+    GLUETUN_PF_NETNS_SYSFS="${GLUETUN_NETNS_WATCHDOG_SYSFS:-/sys/class/net}"
+
+    netns_watchdog_configure
+    NETNS_STATE_DIR=/run/mod-universal-gluetun-netns-watchdog
+
+    POLL_INTERVAL="${GLUETUN_NETNS_WATCHDOG_INTERVAL:-15}"
+    if ! is_uint "${POLL_INTERVAL}" || ((POLL_INTERVAL < 1 || POLL_INTERVAL > 3600)); then
+        loud "GLUETUN_NETNS_WATCHDOG_INTERVAL='${POLL_INTERVAL}' is not a number from 1 to 3600, using 15"
+        POLL_INTERVAL=15
+    fi
+}
+
+TERMINATE=0
+_sleep_pid=""
+_on_term() {
+    TERMINATE=1
+    [[ -n ${_sleep_pid} ]] && kill "${_sleep_pid}" 2>/dev/null
+    return 0
+}
+trap _on_term TERM INT
+
+_sleep() {
+    sleep "$1" &
+    _sleep_pid=$!
+    wait "${_sleep_pid}" 2>/dev/null
+    _sleep_pid=""
+    if ((TERMINATE)); then
+        log "shutting down"
+        exit 0
+    fi
+    return 0
+}
+
+main() {
+    if falsey "${GLUETUN_NETNS_WATCHDOG_ENABLED:-true}"; then
+        log "disabled by GLUETUN_NETNS_WATCHDOG_ENABLED"
+        return 0
+    fi
+    if ((!HELPER_LOADED)); then
+        loud "watchdog helper is missing at ${WATCHDOG_LIB}; not restarting"
+        return 78
+    fi
+
+    configure
+    loud "starting"
+    log "interface directory : ${NETNS_SYSFS}"
+    log "poll interval       : ${POLL_INTERVAL}s"
+    if ((NETNS_DRY_RUN)); then
+        log "watchdog           : DRY RUN, ${NETNS_STRIKES_MAX} strikes, ${NETNS_GRACE}s grace (logs the decision, halts nothing)"
+    elif ((NETNS_MAX_HALTS > 0)); then
+        log "watchdog           : armed, ${NETNS_STRIKES_MAX} strikes, ${NETNS_GRACE}s grace, exit ${NETNS_EXIT_CODE}, gives up after ${NETNS_MAX_HALTS} failed halt(s)"
+    else
+        log "watchdog           : armed, ${NETNS_STRIKES_MAX} strikes, ${NETNS_GRACE}s grace, exit ${NETNS_EXIT_CODE}, never gives up"
+    fi
+    log "  -> recovery needs 'restart: unless-stopped' (or 'on-failure') on this container"
+
+    # The helper uses Bash's SECONDS for its startup grace period. Start that
+    # clock after configuration so tests and a slow container init do not spend
+    # the grace before the service actually begins checking.
+    SECONDS=0
+    while ((!TERMINATE)); do
+        netns_watchdog_check
+        _sleep "${POLL_INTERVAL}"
+    done
+}
+
+if [[ ${GLUETUN_NETNS_WATCHDOG_LIB_ONLY:-0} != 1 ]]; then
+    main
+fi

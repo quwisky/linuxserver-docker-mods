@@ -138,6 +138,14 @@ NETNS_MAX_HALTS=3       # halt attempts per container start before giving up
 NETNS_STATE_DIR=/run/mod-gluetun-portforward
 NETNS_BOOT_TOKEN=""     # empty = derive it from PID 1; set directly by the tests
 
+# The standalone universal watchdog uses this helper too, but exposes neutral
+# variable names rather than the GLUETUN_PF_* names owned by the port-forward
+# mods. Callers can replace these two bits of user-facing text after sourcing
+# the helper without changing any of its safety behavior. Initialise them
+# unconditionally so unrelated container variables cannot inject log text.
+NETNS_DRY_RUN_ENV_NAME=GLUETUN_PF_NETNS_WATCHDOG_DRY_RUN
+NETNS_GIVEUP_CONTINUATION="The port sync carries on regardless."
+
 #-------------------------------------------------------------------------------
 # netns_watchdog_configure(): env -> globals. Called from the mod's configure(),
 # so that sourcing ./run with GLUETUN_PF_LIB_ONLY=1 still has no side effects.
@@ -378,7 +386,7 @@ netns_watchdog_check() {
     if ((NETNS_DRY_RUN)); then
         if ((!NETNS_DRY_RUN_ANNOUNCED)); then
             NETNS_DRY_RUN_ANNOUNCED=1
-            loud "DRY RUN: would halt the container now with exit ${NETNS_EXIT_CODE}; set GLUETUN_PF_NETNS_WATCHDOG_DRY_RUN=false to arm it"
+            loud "DRY RUN: would halt the container now with exit ${NETNS_EXIT_CODE}; set ${NETNS_DRY_RUN_ENV_NAME}=false to arm it"
         fi
         return 0
     fi
@@ -394,7 +402,7 @@ netns_watchdog_check() {
         log "  -> halting is plainly not recovering this container, so continuing would just restart it forever."
         log "  -> check it has 'restart: unless-stopped' (or 'on-failure'): without a restart policy the halt stops it for good."
         log "  -> check gluetun itself is running, since docker will not start a container whose 'network_mode: service:' target is down."
-        log "  -> the watchdog is now off until this container is restarted. The port sync carries on regardless."
+        log "  -> the watchdog is now off until this container is restarted. ${NETNS_GIVEUP_CONTINUATION}"
         NETNS_WATCHDOG=0
         return 0
     fi

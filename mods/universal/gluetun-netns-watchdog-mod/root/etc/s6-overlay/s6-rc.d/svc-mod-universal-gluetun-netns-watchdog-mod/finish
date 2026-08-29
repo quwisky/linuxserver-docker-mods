@@ -1,0 +1,21 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+#
+# $1 = exit code of ./run (256 if it was signalled), $2 = signal number.
+
+P="[mod-universal-gluetun-netns-watchdog]"
+enabled="${GLUETUN_NETNS_WATCHDOG_ENABLED:-true}"
+
+# A deliberately disabled service and a missing helper cannot become healthy by
+# restarting the longrun. Exit 125 tells s6-supervise to leave it down.
+if [[ ${enabled,,} =~ ^(0|false|no|off|disable|disabled)$ ]] || [[ ${1} == 78 ]]; then
+    exit 125
+fi
+
+if [[ ${1} != 0 ]]; then
+    echo "${P} **** exited unexpectedly (status ${1}, signal ${2:-0}); s6 will restart it shortly ****"
+    # Keep a bad script or transient startup fault from becoming a hot loop.
+    sleep 3
+fi
+
+exit 0
