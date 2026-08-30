@@ -22,6 +22,7 @@ permissions:
 
 jobs:
   rollback:
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     environment: rollback
     steps:
@@ -52,6 +53,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: repoint latest to the verified version
         env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           OWNER: ${{ steps.owner.outputs.name }}
           PACKAGE: ${{ inputs.package }}
           VERSION: ${{ inputs.version }}
@@ -59,11 +61,24 @@ jobs:
           GH_USER: ${{ github.actor }}
           GH_PASS: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          tag="${PACKAGE}/v${VERSION}"
+          release="$(gh release view "${tag}" --json body,isDraft)"
+          [[ $(jq -r .isDraft <<<"${release}") == false ]] || {
+            echo "::error::${tag} is not a published release"; exit 1;
+          }
+          # shellcheck disable=SC2016
+          recorded="$(jq -r .body <<<"${release}" | sed -nE 's/^- Digest: `(sha256:[0-9a-f]{64})`$/\1/p' | head -1)"
+          [[ ${recorded} == sha256:* ]] || {
+            echo "::error::${tag} has no recorded release digest"; exit 1;
+          }
           source="ghcr.io/${OWNER}/${PACKAGE}:${VERSION}"
           target="ghcr.io/${OWNER}/${PACKAGE}:latest"
           inspection="$(docker buildx imagetools inspect "${source}")"
           digest="$(awk '$1 == "Digest:" {print $2; exit}' <<<"${inspection}")"
           [[ ${digest} == sha256:* ]] || { echo "::error::release digest not found"; exit 1; }
+          [[ ${digest} == "${recorded}" ]] || {
+            echo "::error::${source} is ${digest}, but ${tag} records ${recorded}"; exit 1;
+          }
           options=()
           [[ ${PLATFORMS} == *,* ]] || options+=(--prefer-index=false)
           docker buildx imagetools create "${options[@]}" --tag "${target}" "${source}@${digest}"

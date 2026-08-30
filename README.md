@@ -254,7 +254,8 @@ SBOM and provenance attestations, and publishes one package-scoped Git tag and
 GitHub Release.
 
 Release runs are serialized and idempotent. A rerun verifies any completed tag
-and continues; it never rebuilds or rewrites an immutable version. Emergency
+and continues from the same authorized source commit; releases have no manual
+dispatch path and never rebuild or rewrite an immutable version. Emergency
 rollback is a separately approved workflow that can temporarily repoint only
 `latest` to an older verified digest. It records that action in the release.
 
@@ -262,6 +263,10 @@ The VAAPI mod is the one scheduled exception: a weekly dependency probe
 fingerprints only the Alpine-derived files actually shipped. It opens a reviewed
 patch PR only when those bytes, modes, or symlinks change. Renovate pins the
 Alpine base digest but marks base-only motion `release:none`.
+
+The first probe records a reviewed `release:none` fingerprint baseline. Later
+probes compare against the released baseline or an already-open update PR, so
+the same candidate is not replaced when review spans another weekly run.
 
 SemVer is package-specific:
 
@@ -280,6 +285,8 @@ Packages write, and Administration write for the one-time branch/Pages cutover.
 Protect `master` with required pull requests, current branches, resolved
 conversations, and the single `CI / required` check. A ruleset should restrict
 `<package>/v*` tag creation to the release App and deny tag updates/deletion.
+Restrict updates to the `release/next` branch to that App as well; CI rejects
+plans from every other branch and reproduces the plan from `master` fragments.
 
 Create `release`, `test-publish`, `rollback`, and `cutover` environments. The
 last three require maintainer approval; merging the rolling release PR is the

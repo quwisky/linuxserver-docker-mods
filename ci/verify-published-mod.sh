@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 usage() {
-    printf 'usage: GH_USER=<user> GH_PASS=<token> ci/verify-published-mod.sh ghcr.io/<owner>/<package>:<tag>\n' >&2
+    printf 'usage: GH_USER=<user> GH_PASS=<token> ci/verify-published-mod.sh ghcr.io/<owner>/<package>:<tag>[@sha256:<digest>]\n' >&2
     exit 2
 }
 
@@ -14,17 +14,28 @@ REFERENCE="$1"
 [[ ${REFERENCE} == ghcr.io/*:* ]] || usage
 
 ref="${REFERENCE#ghcr.io/}"
-repo="${ref%%:*}"
-selector="${ref#*:}"
+if [[ ${ref} == *@sha256:* ]]; then
+    repo="${ref%%@*}"
+    selector="${ref#*@}"
+else
+    repo="${ref%%:*}"
+    selector="${ref#*:}"
+fi
 token="$(curl --fail --silent --show-error -u "${GH_USER}:${GH_PASS}" \
     "https://ghcr.io/token?scope=repository:${repo}:pull&service=ghcr.io" | jq -er .token)"
 
 request_manifest() {
     local wanted="$1"
+    local child="${2:-false}"
+    local -a headers=(
+        --header 'Accept: application/vnd.docker.distribution.manifest.v2+json'
+        --header 'Accept: application/vnd.oci.image.index.v1+json'
+    )
+    if [[ ${child} == true ]]; then
+        headers+=(--header 'Accept: application/vnd.oci.image.manifest.v1+json')
+    fi
     curl --silent --show-error --write-out '\n%{http_code}' \
-        --header 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
-        --header 'Accept: application/vnd.oci.image.index.v1+json' \
-        --header 'Accept: application/vnd.oci.image.manifest.v1+json' \
+        "${headers[@]}" \
         --header "Authorization: Bearer ${token}" \
         "https://ghcr.io/v2/${repo}/manifests/${wanted}"
 }
@@ -55,7 +66,7 @@ else
     for entry in "${manifests[@]}"; do
         platform="${entry%%$'\t'*}"
         digest="${entry#*$'\t'}"
-        child="$(request_manifest "${digest}")"
+        child="$(request_manifest "${digest}" true)"
         child_code="${child##*$'\n'}"
         child_json="${child%$'\n'*}"
         [[ ${child_code} == 200 ]] || {

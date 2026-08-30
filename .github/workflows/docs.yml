@@ -34,6 +34,7 @@ concurrency:
 jobs:
   build:
     name: Build documentation
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

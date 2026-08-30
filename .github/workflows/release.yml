@@ -4,7 +4,6 @@ on:
   push:
     branches: [master]
     paths: [.release/plan.json]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,21 +19,25 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       count: ${{ steps.plan.outputs.count }}
+      source: ${{ steps.plan.outputs.source }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: plan
         run: |
-          jq -e '.source_sha | type == "string" and length == 40' .release/plan.json >/dev/null
+          python3 ci/release.py verify-plan --owner "${GITHUB_REPOSITORY_OWNER,,}"
           source_sha="$(jq -r .source_sha .release/plan.json)"
           git merge-base --is-ancestor "${source_sha}" "${GITHUB_SHA}" || {
             echo "::error::release plan source ${source_sha} is not an ancestor of ${GITHUB_SHA}"; exit 1
           }
           matrix="$(jq -c '{include: .packages}' .release/plan.json)"
           count="$(jq '.include | length' <<<"${matrix}")"
-          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
-          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          {
+            echo "matrix=${matrix}"
+            echo "count=${count}"
+            echo "source=${source_sha}"
+          } >> "$GITHUB_OUTPUT"
 
   package:
     name: Release package matrix
@@ -43,15 +46,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     uses: ./.github/workflows/_mod-ci.yml
     with:
       app: ${{ matrix.app }}
       mod: ${{ matrix.mod }}
       platforms: ${{ matrix.platforms }}
+      source-ref: ${{ needs.plan.outputs.source }}
       publish: true
       moving-tag: edge
       release-version: ${{ matrix.version }}
-      release-notes: ${{ join(matrix.notes, '\n\n') }}
+      release-notes-json: ${{ toJSON(matrix.notes) }}
       candidate-ref: ${{ matrix.candidate_ref }}
       candidate-digest: ${{ matrix.candidate_digest }}
       deployment-environment: release

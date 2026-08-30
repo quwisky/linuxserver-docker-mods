@@ -230,6 +230,55 @@ class ReleaseCommandTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("rebuild one candidate from the combined change", result.stderr)
 
+    def test_verify_plan_matches_the_base_fragments_exactly(self) -> None:
+        add_mod(self.repo, "plex", "alpha")
+        self.repo.write(
+            ".changes/fix.json",
+            json.dumps(
+                {
+                    "summary": "Correct startup ordering.",
+                    "packages": {"plex-alpha": "patch"},
+                }
+            ),
+        )
+        base = self.repo.commit("runtime change")
+        self.repo.release("prepare")
+
+        valid = self.repo.release("verify-plan", "--base", base)
+
+        self.assertEqual(valid.stdout.strip(), "release plan is valid")
+        plan_path = self.repo.root / ".release/plan.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["packages"][0]["notes"] = ["Unreviewed replacement note."]
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        invalid = self.repo.release("verify-plan", "--base", base, check=False)
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("does not exactly match", invalid.stderr)
+
+    def test_verify_plan_rejects_a_candidate_for_another_package(self) -> None:
+        add_mod(self.repo, "plex", "alpha")
+        self.repo.write(
+            ".changes/fix.json",
+            json.dumps(
+                {
+                    "summary": "Correct startup ordering.",
+                    "packages": {"plex-alpha": "patch"},
+                }
+            ),
+        )
+        self.repo.commit("runtime change")
+        self.repo.release("prepare")
+        plan_path = self.repo.root / ".release/plan.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["packages"][0]["candidate_ref"] = "ghcr.io/example/plex-other:candidate-vaapi-bad"
+        plan["packages"][0]["candidate_digest"] = f"sha256:{'a' * 64}"
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+        result = self.repo.release("verify-plan", "--owner", "example", check=False)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid candidate ref", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

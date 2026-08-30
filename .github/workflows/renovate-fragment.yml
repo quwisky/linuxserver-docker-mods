@@ -48,7 +48,13 @@ jobs:
             packages: {"plex-vaapi-amdgpu-mod": "none"}
           }')"
           encoded="$(printf '%s\n' "${content}" | base64 -w0)"
-          existing="$(gh api "repos/${GITHUB_REPOSITORY}/contents/${path}?ref=${BRANCH}" --jq .sha 2>/dev/null || true)"
+          existing_json="$(gh api "repos/${GITHUB_REPOSITORY}/contents/${path}?ref=${BRANCH}" 2>/dev/null || true)"
+          existing="$(jq -r '.sha // empty' <<<"${existing_json}")"
+          current="$(jq -r '.content // empty' <<<"${existing_json}" | tr -d '\n' | base64 -d 2>/dev/null || true)"
+          if [[ -n ${existing} && ${current} == "${content}" ]]; then
+            echo 'release intent is already current'
+            exit 0
+          fi
           args=(--method PUT "repos/${GITHUB_REPOSITORY}/contents/${path}" -f message='chore(release): record Renovate release intent' -f content="${encoded}" -f branch="${BRANCH}")
           if [[ -n ${existing} ]]; then args+=(-f sha="${existing}"); fi
           gh api "${args[@]}" >/dev/null

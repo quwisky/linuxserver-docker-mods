@@ -11,11 +11,14 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, dataclass
 from datetime import date
+import io
 import json
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tarfile
+import tempfile
 from typing import Any, Iterable
 
 
@@ -24,6 +27,20 @@ BUMP_RANK = {"none": 0, "patch": 1, "minor": 2, "major": 3}
 SHARED_COPY = re.compile(r"(?:^|\s)(shared/[A-Za-z0-9._/-]+)")
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 RUNTIME_NAMES = {"Dockerfile", "PLATFORMS"}
+PLAN_FIELDS = {
+    "app",
+    "mod",
+    "id",
+    "dir",
+    "platforms",
+    "previous_version",
+    "version",
+    "bump",
+    "tag",
+    "notes",
+    "candidate_ref",
+    "candidate_digest",
+}
 
 
 class ReleaseError(RuntimeError):
@@ -315,6 +332,99 @@ def build_plan(repo: Path) -> dict[str, Any]:
     return {"source_sha": source_sha, "packages": entries}
 
 
+def read_plan(repo: Path) -> dict[str, Any]:
+    path = repo / ".release/plan.json"
+    try:
+        plan = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise ReleaseError(".release/plan.json is missing") from error
+    except json.JSONDecodeError as error:
+        raise ReleaseError(f".release/plan.json is not valid JSON: {error}") from error
+    if not isinstance(plan, dict) or set(plan) != {"source_sha", "packages"}:
+        raise ReleaseError("release plan needs exactly source_sha and packages")
+    if not isinstance(plan["source_sha"], str) or not re.fullmatch(
+        r"[0-9a-f]{40}", plan["source_sha"]
+    ):
+        raise ReleaseError("release plan source_sha must be a full lowercase commit SHA")
+    if not isinstance(plan["packages"], list):
+        raise ReleaseError("release plan packages must be an array")
+    return plan
+
+
+def validate_plan_structure(repo: Path, plan: dict[str, Any], owner: str = "") -> None:
+    packages = {package.id: package for package in discover_packages(repo)}
+    seen: set[str] = set()
+    for index, entry in enumerate(plan["packages"]):
+        label = f"release plan package {index}"
+        if not isinstance(entry, dict) or set(entry) != PLAN_FIELDS:
+            raise ReleaseError(f"{label} has an invalid field set")
+        package_id = entry["id"]
+        if not isinstance(package_id, str) or package_id not in packages:
+            raise ReleaseError(f"{label} names unknown package {package_id}")
+        if package_id in seen:
+            raise ReleaseError(f"release plan repeats package {package_id}")
+        seen.add(package_id)
+        package = packages[package_id]
+        for field in ("app", "mod", "dir", "platforms"):
+            if entry[field] != getattr(package, field):
+                raise ReleaseError(f"release plan {package_id} has incorrect {field}")
+        previous = entry["previous_version"]
+        version = entry["version"]
+        bump = entry["bump"]
+        if not isinstance(previous, str) or not SEMVER.fullmatch(previous):
+            raise ReleaseError(f"release plan {package_id} has invalid previous_version")
+        if bump not in {"patch", "minor", "major"}:
+            raise ReleaseError(f"release plan {package_id} has invalid bump")
+        if version != bump_version(previous, bump) or version != package.version:
+            raise ReleaseError(f"release plan {package_id} version does not match its bump and VERSION")
+        if entry["tag"] != f"{package_id}/v{version}":
+            raise ReleaseError(f"release plan {package_id} has an invalid Git tag")
+        notes = entry["notes"]
+        if not isinstance(notes, list) or not notes or not all(
+            isinstance(note, str) and note.strip() for note in notes
+        ):
+            raise ReleaseError(f"release plan {package_id} needs non-empty notes")
+        candidate_ref = entry["candidate_ref"]
+        candidate_digest = entry["candidate_digest"]
+        if not isinstance(candidate_ref, str) or not isinstance(candidate_digest, str):
+            raise ReleaseError(f"release plan {package_id} candidate fields must be strings")
+        if bool(candidate_ref) != bool(candidate_digest):
+            raise ReleaseError(f"release plan {package_id} has an incomplete candidate")
+        if candidate_ref:
+            prefix = f"ghcr.io/{owner}/{package_id}:" if owner else "ghcr.io/"
+            if not candidate_ref.startswith(prefix) or "@" in candidate_ref:
+                raise ReleaseError(f"release plan {package_id} has an invalid candidate ref")
+            if not owner and f"/{package_id}:" not in candidate_ref:
+                raise ReleaseError(f"release plan {package_id} candidate targets another package")
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", candidate_digest):
+                raise ReleaseError(f"release plan {package_id} has an invalid candidate digest")
+
+
+def verify_plan(repo: Path, base: str = "", owner: str = "") -> None:
+    plan = read_plan(repo)
+    validate_plan_structure(repo, plan, owner.lower())
+    if not base:
+        return
+    resolved_base = run_git(repo, "rev-parse", "--verify", f"{base}^{{commit}}")
+    archive = subprocess.run(
+        ["git", "archive", "--format=tar", resolved_base],
+        cwd=repo,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if archive.returncode:
+        raise ReleaseError(archive.stderr.decode().strip() or "git archive failed")
+    with tempfile.TemporaryDirectory() as temporary:
+        snapshot = Path(temporary)
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as tar:
+            tar.extractall(snapshot, filter="data")
+        expected = build_plan(snapshot)
+    expected["source_sha"] = resolved_base
+    if plan != expected:
+        raise ReleaseError("release plan does not exactly match the base branch change fragments")
+
+
 def affected_packages(repo: Path, base: str, head: str) -> dict[str, list[dict[str, Any]]]:
     packages = discover_packages(repo)
     package_by_dir = {package.dir: package for package in packages}
@@ -430,6 +540,9 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--head", required=True)
     subcommands.add_parser("plan")
     subcommands.add_parser("prepare")
+    verify = subcommands.add_parser("verify-plan")
+    verify.add_argument("--base", default="")
+    verify.add_argument("--owner", default="")
     return result
 
 
@@ -449,6 +562,10 @@ def main() -> int:
             output = build_plan(repo)
         elif arguments.command == "prepare":
             output = prepare(repo)
+        elif arguments.command == "verify-plan":
+            verify_plan(repo, arguments.base, arguments.owner)
+            print("release plan is valid")
+            return 0
         else:  # pragma: no cover - argparse enforces the command set.
             raise AssertionError(arguments.command)
         print(json.dumps(output, indent=None, sort_keys=True))

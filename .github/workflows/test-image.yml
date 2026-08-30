@@ -25,6 +25,7 @@ concurrency:
 
 jobs:
   resolve:
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     outputs:
       app: ${{ steps.package.outputs.app }}
@@ -54,6 +55,11 @@ jobs:
 
   publish:
     needs: resolve
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     uses: ./.github/workflows/_mod-ci.yml
     with:
       app: ${{ needs.resolve.outputs.app }}
@@ -62,13 +68,16 @@ jobs:
       source-ref: ${{ needs.resolve.outputs.sha }}
       publish: true
       moving-tag: ${{ needs.resolve.outputs.tag }}
+      candidate-tag: ${{ needs.resolve.outputs.tag }}
       deployment-environment: test-publish
     secrets: inherit
 
   cleanup:
     needs: [resolve, publish]
     runs-on: ubuntu-latest
+    environment: test-publish
     permissions:
+      contents: read
       packages: write
     steps:
       - uses: actions/checkout@v7
