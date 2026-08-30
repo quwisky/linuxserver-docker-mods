@@ -265,6 +265,11 @@ repository GitHub App maintains one combined
 `VERSION` and `CHANGELOG.md`, and creates exact `<package>/vX.Y.Z` tags and draft
 GitHub Releases when that pull request is squash-merged.
 
+After each run, the same App token keeps an open release pull request current
+with `master` through GitHub's update-branch API. This preserves App-only branch
+ownership while satisfying the strict up-to-date merge requirement, even when
+non-release maintenance commits do not change Release Please's generated files.
+
 The squash-merge pull-request title is the release signal for every affected
 package: `fix` makes a patch, `feat` makes a minor, and `!` or a
 `BREAKING CHANGE:` footer makes a major. `chore`, `build`, `ci`, `docs`, `test`,

@@ -42,6 +42,9 @@ Conventional Commit pull-request titles.
 
 ### Fixed
 
+- App-owned Release Please pull requests now update themselves from `master`
+  after non-release commits, avoiding a deadlock between strict up-to-date
+  checks and the rule that prevents humans from updating the release branch.
 - Digest promotion now passes the registry credentials required by the trusted
   published-image verifier, preventing edge and release publication from
   failing after a candidate image has already been pushed successfully.
