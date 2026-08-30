@@ -136,17 +136,22 @@ def shared_digest(directory: Path) -> str:
         raise ReleaseError(f"shared component is missing: {directory}")
     digest = hashlib.sha256()
     for path in sorted(directory.rglob("*"), key=lambda item: item.relative_to(directory).as_posix()):
+        # Git does not store directory modes (or empty directories), so hashing
+        # them would make the marker depend on the checkout's umask.
+        if path.is_dir() and not path.is_symlink():
+            continue
         relative = path.relative_to(directory).as_posix()
         metadata = path.lstat()
         mode = stat.S_IMODE(metadata.st_mode)
         if path.is_symlink():
             kind = "symlink"
+            mode = 0
             payload = os.readlink(path).encode()
-        elif path.is_dir():
-            kind = "directory"
-            payload = b""
         elif path.is_file():
             kind = "file"
+            # Git preserves only the executable bit, not group/other write
+            # permissions inherited from a checkout's umask.
+            mode = 0o755 if mode & 0o111 else 0o644
             payload = path.read_bytes()
         else:
             raise ReleaseError(f"unsupported shared input: {path}")

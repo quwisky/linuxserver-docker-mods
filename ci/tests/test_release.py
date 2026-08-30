@@ -124,6 +124,19 @@ class ReleaseCommandTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("is stale", result.stderr)
 
+    def test_shared_marker_ignores_untracked_directory_modes(self) -> None:
+        add_mod(self.repo, "plex", "alpha", "FROM scratch\nCOPY shared/runtime/ /runtime/\n")
+        self.repo.write("shared/runtime/bin/helper.sh", "helper\n")
+        self.repo.release("shared-markers", "--write")
+        (self.repo.root / "shared/runtime/bin").chmod(0o700)
+
+        unchanged = self.repo.release("shared-markers", check=False)
+        (self.repo.root / "shared/runtime/bin/helper.sh").chmod(0o755)
+        changed = self.repo.release("shared-markers", check=False)
+
+        self.assertEqual(unchanged.returncode, 0, unchanged.stderr)
+        self.assertNotEqual(changed.returncode, 0)
+
     def test_runtime_change_requires_releasable_title(self) -> None:
         add_mod(self.repo, "plex", "alpha")
         self.repo.write("mods/plex/alpha/root/run", "old\n")
