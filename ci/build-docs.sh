@@ -5,8 +5,9 @@
 #
 # The READMEs stay the single source of truth: they are what GitHub renders, what
 # the GHCR package pages show, and what someone reads in a clone. Maintaining a
-# second copy under docs/ would drift within a week, so docs/ is generated and
-# git-ignored.
+# second copy under docs/ would drift within a week, so generated pages stay
+# git-ignored. The tracked docs/agents/ configuration is preserved but excluded
+# from the public site.
 #
 # What this has to fix up is links. A relative link that works from
 # mods/plex/vaapi-amdgpu-mod/README.md does not work from the page it becomes,
@@ -46,7 +47,11 @@ if [[ -e ${OUT_ABS} && ${OUT_ABS} != "${REPO}/docs" && ! -f ${OUT_ABS}/${MARKER}
     exit 1
 fi
 
-rm -rf -- "${OUT_ABS}"
+if [[ ${OUT_ABS} == "${REPO}/docs" && -d ${OUT_ABS}/agents ]]; then
+    find "${OUT_ABS}" -mindepth 1 -maxdepth 1 ! -name agents -exec rm -rf -- {} +
+else
+    rm -rf -- "${OUT_ABS}"
+fi
 mkdir -p "${OUT_ABS}"
 touch "${OUT_ABS}/${MARKER}"
 # Use the canonical path from here on, so a symlink or `..` component cannot

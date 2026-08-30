@@ -14,6 +14,8 @@ Conventional Commit pull-request titles.
 
 ### Added
 
+- Repository-local engineering-skill configuration for GitHub Issues, default
+  triage labels, and single-context domain documentation.
 - Independent SemVer releases for every mod, with package-scoped Git tags,
   GitHub Releases, exact/minor/major GHCR aliases, signed provenance, SBOMs, and
   digest-preserving promotion from a verified immutable candidate.
