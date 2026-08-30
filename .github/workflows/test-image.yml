@@ -23,7 +23,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          path: .trusted
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
           ref: ${{ github.event.client_payload.ref }}
+          path: .source
           persist-credentials: false
       - id: package
         env:
@@ -34,13 +39,21 @@ jobs:
           [[ -n ${APP} && -n ${MOD} && -n ${SOURCE_REF} ]] || {
             echo "::error::app, mod, and ref are required"; exit 1;
           }
-          package="$(python3 ci/release.py packages | jq -c --arg app "${APP}" --arg mod "${MOD}" '.[] | select(.app == $app and .mod == $mod)')"
+          [[ ${APP} =~ ^[a-z0-9][a-z0-9._-]*$ && ${MOD} =~ ^[a-z0-9][a-z0-9._-]*$ ]] || {
+            echo "::error::invalid package path"; exit 1;
+          }
+          package="$(python3 .trusted/ci/release.py --repo .source packages \
+            | jq -c --arg app "${APP}" --arg mod "${MOD}" '.[] | select(.app == $app and .mod == $mod)')"
           [[ -n ${package} ]] || { echo "::error::unknown package ${APP}/${MOD}"; exit 1; }
-          sha="$(git rev-parse HEAD)"
+          platforms="$(jq -r .platforms <<<"${package}")"
+          [[ ${platforms} =~ ^linux/(amd64|arm64)(,linux/(amd64|arm64))*$ ]] || {
+            echo "::error::unsupported platforms: ${platforms}"; exit 1;
+          }
+          sha="$(git -C .source rev-parse HEAD)"
           {
             echo "app=${APP}"
             echo "mod=${MOD}"
-            echo "platforms=$(jq -r .platforms <<<"${package}")"
+            echo "platforms=${platforms}"
             echo "tag=test-${sha:0:12}"
             echo "sha=${sha}"
           } >> "$GITHUB_OUTPUT"

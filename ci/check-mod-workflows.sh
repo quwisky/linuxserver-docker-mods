@@ -126,6 +126,10 @@ if [[ ${WF_DIR} == .github/workflows ]]; then
             err "${test_publisher} must not load privileged code from a selected ref."
             rc=1
         fi
+        grep -qF 'python3 .trusted/ci/release.py --repo .source packages' "${test_publisher}" || {
+            err "${test_publisher} must parse requested refs with trusted tooling."
+            rc=1
+        }
     fi
     for workflow in "${ci}" "${reusable}" "${publisher}" "${edge}" "${test_publisher}"; do
         [[ -f ${workflow} ]] || continue
