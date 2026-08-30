@@ -163,7 +163,7 @@ if [[ ${WF_DIR} == .github/workflows ]]; then
                 rc=1
             }
         done
-        grep -qF 'GH_REPO: ${{ github.repository }}' "${publisher}" || {
+        grep -qF "GH_REPO: \${{ github.repository }}" "${publisher}" || {
             err "${publisher} does not give GitHub CLI an explicit repository context."
             rc=1
         }
