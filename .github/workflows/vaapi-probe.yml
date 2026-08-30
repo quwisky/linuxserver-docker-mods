@@ -1,0 +1,129 @@
+name: VAAPI dependency probe
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: read
+
+concurrency:
+  group: vaapi-dependency-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Compare shipped VAAPI bytes
+    runs-on: ubuntu-latest
+    environment: release
+    env:
+      DIR: mods/plex/vaapi-amdgpu-mod
+      ID: plex-vaapi-amdgpu-mod
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - id: owner
+        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build once and fingerprint the final overlay
+        id: fingerprint
+        env:
+          OWNER: ${{ steps.owner.outputs.name }}
+        run: |
+          docker buildx build --pull --no-cache --load --provenance=false --platform linux/amd64 \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.title=${ID}" \
+            -f "${DIR}/Dockerfile" -t "local/${ID}:probe" .
+          container="$(docker create "local/${ID}:probe" /nonexistent)"
+          scratch="$(mktemp -d)"
+          trap 'docker rm -f "${container}" >/dev/null 2>&1 || true; rm -rf "${scratch}"' EXIT
+          docker export "${container}" | tar -xf - -C "${scratch}"
+          python3 ci/vaapi-fingerprint.py "${scratch}" --output "${RUNNER_TEMP}/VAAPI-FINGERPRINT.json"
+          fingerprint="$(jq -r .fingerprint "${RUNNER_TEMP}/VAAPI-FINGERPRINT.json")"
+          previous="$(jq -r '.fingerprint // empty' "${DIR}/VAAPI-FINGERPRINT.json" 2>/dev/null || true)"
+          if [[ ${fingerprint} == "${previous}" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No shipped VAAPI byte changed."
+            exit 0
+          fi
+          short="${fingerprint#sha256:}"
+          short="${short:0:12}"
+          candidate="ghcr.io/${OWNER}/${ID}:candidate-vaapi-${short}-${GITHUB_RUN_ID}"
+          docker tag "local/${ID}:probe" "${candidate}"
+          docker push "${candidate}"
+          inspection="$(docker buildx imagetools inspect "${candidate}")"
+          digest="$(awk '$1 == "Digest:" {print $2; exit}' <<<"${inspection}")"
+          [[ ${digest} == sha256:* ]] || { echo "::error::candidate digest is missing"; exit 1; }
+          GH_USER="${GITHUB_ACTOR}" GH_PASS="${{ secrets.GITHUB_TOKEN }}" ci/verify-published-mod.sh "${candidate}"
+          {
+            echo "changed=true"
+            echo "fingerprint=${fingerprint}"
+            echo "short=${short}"
+            echo "candidate=${candidate}"
+            echo "digest=${digest}"
+          } >> "$GITHUB_OUTPUT"
+      - name: resolve Alpine package audit from the cached source stage
+        if: steps.fingerprint.outputs.changed == 'true'
+        run: |
+          docker buildx build --load --provenance=false --platform linux/amd64 --target source \
+            -f "${DIR}/Dockerfile" -t "local/${ID}:source" .
+          docker run --rm "local/${ID}:source" sh -c 'apk info -v | LC_ALL=C sort' \
+            >"${RUNNER_TEMP}/VAAPI-PACKAGES.txt"
+      - name: open the reviewed artifact-update pull request
+        if: steps.fingerprint.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          FINGERPRINT: ${{ steps.fingerprint.outputs.fingerprint }}
+          SHORT: ${{ steps.fingerprint.outputs.short }}
+          CANDIDATE: ${{ steps.fingerprint.outputs.candidate }}
+          DIGEST: ${{ steps.fingerprint.outputs.digest }}
+        run: |
+          branch="deps/vaapi-runtime-${SHORT}"
+          git switch --force-create "${branch}" origin/master
+          cp "${RUNNER_TEMP}/VAAPI-FINGERPRINT.json" "${DIR}/VAAPI-FINGERPRINT.json"
+          cp "${RUNNER_TEMP}/VAAPI-PACKAGES.txt" "${DIR}/VAAPI-PACKAGES.txt"
+          fragment=".changes/vaapi-runtime-${SHORT}.json"
+          jq -n --arg ref "${CANDIDATE}" --arg digest "${DIGEST}" '{
+            summary: "Refresh the shipped VAAPI runtime libraries from Alpine edge.",
+            packages: {"plex-vaapi-amdgpu-mod": "patch"},
+            candidates: {"plex-vaapi-amdgpu-mod": {ref: $ref, digest: $digest}}
+          }' >"${fragment}"
+          git add "${DIR}/VAAPI-FINGERPRINT.json" "${DIR}/VAAPI-PACKAGES.txt" "${fragment}"
+          git config user.name 'linuxserver-docker-mods-release[bot]'
+          git config user.email 'linuxserver-docker-mods-release[bot]@users.noreply.github.com'
+          git commit -m 'chore(plex-vaapi-amdgpu-mod): refresh runtime libraries'
+          git push --force-with-lease origin "HEAD:${branch}"
+          body="${RUNNER_TEMP}/vaapi-pr.md"
+          {
+            echo '## What'
+            echo
+            echo 'Updates the audited VAAPI runtime overlay because its normalized shipped-file fingerprint changed.'
+            echo
+            echo "- Fingerprint: \`${FINGERPRINT}\`"
+            echo "- Candidate: \`${CANDIDATE}@${DIGEST}\`"
+            echo
+            echo 'The candidate was built once and will be promoted without rebuilding after review.'
+          } >"${body}"
+          existing="$(gh pr list --state open --head "${branch}" --json number --jq '.[0].number // empty')"
+          if [[ -n ${existing} ]]; then
+            gh pr edit "${existing}" --body-file "${body}"
+          else
+            gh pr create --base master --head "${branch}" \
+              --title 'chore(plex-vaapi-amdgpu-mod): refresh runtime libraries' --body-file "${body}"
+          fi

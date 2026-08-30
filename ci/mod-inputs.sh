@@ -9,10 +9,9 @@
 # repo root, a mod can also COPY a directory out of shared/ -- and then the mod
 # directory alone is NOT a complete content address.
 #
-# That matters because the nightly publish is deduped on this hash: an unchanged
-# hash resolves to a tag that already exists and the push is skipped. Hashing
-# only the mod directory would mean a change to shared/ produced a genuinely
-# different image that CI then refused to publish, silently, forever.
+# The hash remains useful for auditing whether two candidate builds came from
+# the same versioned inputs. Hashing only the mod directory would omit shared
+# code that is copied into the published layer.
 #
 # The dependency list is read from the Dockerfile rather than configured
 # anywhere, so it cannot drift from what the build actually copies.

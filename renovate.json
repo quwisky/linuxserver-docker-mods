@@ -1,0 +1,21 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "docker:pinDigests"],
+  "enabledManagers": ["dockerfile"],
+  "dependencyDashboard": true,
+  "packageRules": [
+    {
+      "description": "Keep VAAPI's Alpine edge base reviewable without releasing on digest motion alone",
+      "matchDatasources": ["docker"],
+      "matchFileNames": ["mods/plex/vaapi-amdgpu-mod/Dockerfile"],
+      "matchPackageNames": ["alpine"],
+      "automerge": false,
+      "labels": ["dependencies", "release:none"]
+    },
+    {
+      "description": "Never automerge container build inputs",
+      "matchManagers": ["dockerfile"],
+      "automerge": false
+    }
+  ]
+}

@@ -26,62 +26,56 @@ Use one by adding it to `DOCKER_MODS` on the target container:
 
 ```yaml
 environment:
-  - DOCKER_MODS=ghcr.io/quwisky/plex-gluetun-portforward-mod:latest
+  - DOCKER_MODS=ghcr.io/quwisky/plex-gluetun-portforward-mod:1
 ```
 
 Multiple mods are separated by `|`:
 
 ```yaml
-  - DOCKER_MODS=ghcr.io/quwisky/plex-gluetun-portforward-mod:latest|linuxserver/mods:plex-absolute-hama
+  - DOCKER_MODS=ghcr.io/quwisky/plex-gluetun-portforward-mod:1|linuxserver/mods:plex-absolute-hama
 ```
 
 See each mod's own README for its environment variables and troubleshooting.
 
-### Release channels
+### Releases and test images
 
-A mod at `mods/<app>/<mod>` is its own GHCR package named `<app>-<mod>`, with
-ordinary tags:
+A mod at `mods/<app>/<mod>` is independently versioned and published as the GHCR
+package `<app>-<mod>`:
 
-| Image | Built from | When |
-| --- | --- | --- |
-| `ghcr.io/<owner>/<app>-<mod>:latest` | `master` | every push that changes the mod |
-| `ghcr.io/<owner>/<app>-<mod>:<commit-sha>` | `master` | immutable pin of the above |
-| `ghcr.io/<owner>/<app>-<mod>:nightly` | `develop` | every push that changes the mod, and nightly |
-| `ghcr.io/<owner>/<app>-<mod>:nightly-<tree-sha>` | `develop` | immutable pin of the above |
-| `ghcr.io/<owner>/<app>-<mod>:<your-tag>` | any branch | manual run with a custom tag |
+| Tag | Meaning |
+| --- | --- |
+| `:1.4.2` | Exact immutable release |
+| `:1.4` | Latest compatible patch in the minor line |
+| `:1` | Latest compatible release in the major line; recommended |
+| `:latest` | Newest release, including future breaking majors |
+| `:edge` | Last verified relevant commit on `master`; testing only |
+| `:sha-<commit>` | Immutable candidate built from one `master` commit |
+| `:test-<commit>` | Maintainer-approved, short-lived feature image |
 
-`:latest` is what you want. Nightlies exist to try changes before they reach
-`master`:
+Use the current major tag for normal installations. It receives compatible
+patches and features without silently crossing a breaking major:
 
 ```yaml
-  - DOCKER_MODS=ghcr.io/quwisky/plex-gluetun-portforward-mod:nightly
+  - DOCKER_MODS=ghcr.io/quwisky/plex-gluetun-portforward-mod:1
 ```
 
 Note that a container only re-applies a mod when it is **recreated**, not
 restarted — `/docker-mods` caches the layer and skips it when the digest is
-unchanged. `docker compose up -d --force-recreate <service>` picks up a new
-nightly.
+unchanged. `docker compose up -d --force-recreate <service>` picks up a release.
 
-### Publishing a one-off tag
+### Testing unreleased work
 
-Run a mod's workflow from the Actions tab, pick any branch, and fill in the
-**tag** field — `rc1`, `testing`, `v2-trial`. That builds the branch you chose
-and publishes it as `ghcr.io/<owner>/<app>-<mod>:<your-tag>`, which you can then
-point a real container at:
+Pull requests build and test without publishing. A maintainer can run **Publish
+test image**, select an app, mod, and ref, approve the `test-publish`
+environment, and receive a constrained `test-<commit>` tag:
 
 ```yaml
-  - DOCKER_MODS=ghcr.io/quwisky/plex-vaapi-amdgpu-mod:rc1
+  - DOCKER_MODS=ghcr.io/quwisky/plex-vaapi-amdgpu-mod:test-a1b2c3d4e5f6
 ```
 
-A custom tag publishes **only** that tag — it never also moves `:latest` or
-`:nightly`, so trying something out on a branch cannot displace what everyone
-else is pulling. It also skips the nightly's unchanged-content dedupe, since you
-asked for this build explicitly.
-
-`latest` and `nightly` are refused as custom tags. Publishing a channel is what
-running the workflow from `master` or `develop` with the field left blank
-already does, and accepting them here would mean a typo in a text box could
-replace `:latest` with a build from an arbitrary branch.
+Arbitrary tag names are not accepted. The newest five test-only images per
+package are retained; formal release and candidate tags cannot be displaced by
+this workflow.
 
 ## Layout
 
@@ -91,6 +85,9 @@ mods/
     <modname>/                  one mod
       Dockerfile                FROM scratch; COPY paths are repo-relative
       README.md                 that mod's documentation
+      VERSION                   current independent SemVer version
+      CHANGELOG.md              package-specific release history
+      PLATFORMS                 optional build-platform override
       root/                     overlaid onto the target container's filesystem
       test/                     optional; whatever that mod ships (see below)
 shared/
@@ -99,9 +96,10 @@ template/                       scaffold for a new mod, never built
 ci/                             scaffolding and the repo-wide checks
 .dockerignore                   context is the repo root, so this lives here
 .github/workflows/
-  mod-<app>-<modname>.yml       one per mod; carries that mod's paths filter
-  _mod-ci.yml                   reusable; all the per-mod logic lives here once
-  repo.yml                      repo-wide checks, always runs
+  ci.yml                        affected-package matrix and required gate
+  _mod-ci.yml                   reusable package validation and publication
+  release-pr.yml                rolling combined release PR
+  release.yml                   digest promotion and GitHub Releases
 ```
 
 ### Sharing code between mods
@@ -126,22 +124,17 @@ A mod that shares nothing needs no assembly stage — a single
 `COPY mods/<app>/<mod>/root/ /` is still one layer, and that is what
 `template/` scaffolds.
 
-Two things follow, both enforced by `ci/check-shared-files.sh` from `repo.yml`:
+Two things follow, both derived from Dockerfile `COPY` statements:
 
-- **A mod using `shared/<name>` must add `'shared/<name>/**'` to its workflow's
-  `paths:` filter.** Per-mod workflows are gated on their own directory, so
-  without it a change to the shared code would alter that mod's image without
-  running its tests or its build — the same silent failure as having no workflow.
-- **The nightly pin must cover it too.** That pin is content-addressed, and
-  `ci/mod-inputs.sh` derives the hash from the mod directory *plus* every
-  `shared/` directory the Dockerfile copies. Hashing the mod directory alone
-  would make a shared-code change produce a different image under a pin that
-  already exists, so the publish would be skipped — silently, and every night.
+- `ci/release.py affected` expands a shared change to every consuming package,
+  so all affected images are tested and `edge` moves only after verification.
+- A change fragment targeting shared code expands its bump to those same
+  consumers. A package-specific override may increase, but never lower, that
+  bump.
 
 **The two directory levels are the single source of truth.** A mod at
-`mods/<app>/<modname>` is published as `ghcr.io/<owner>/<app>-<modname>` and its
-workflow is `mod-<app>-<modname>.yml`. There is no separate config mapping
-directories to images, so they cannot drift.
+`mods/<app>/<modname>` is published as `ghcr.io/<owner>/<app>-<modname>`. There
+is no separate config mapping directories to images, so they cannot drift.
 
 The app and the mod name stay separate all the way through CI rather than being
 joined into one id, because the join is not reversible: LinuxServer image names
@@ -156,8 +149,8 @@ ci/new-mod.sh <app> <modname>            # e.g. ci/new-mod.sh plex remove-codecs
 
 That copies `template/` to `mods/<app>/<modname>/`, rewrites the
 placeholder names throughout — the s6 service directory names, the `up` file's
-absolute path, the log prefix, the README heading — and writes that mod's CI
-workflow at `.github/workflows/mod-<app>-<modname>.yml`.
+absolute path, the log prefix, and the README heading — and initializes its
+independent version and changelog.
 
 Then:
 
@@ -168,8 +161,8 @@ Then:
    `root/etc/s6-overlay/s6-rc.d/user/contents.d/` and from
    `init-mods-end/dependencies.d/` at the same time.
 3. Make sure any `run`/`finish` you keep is executable — see below.
-4. Push. That mod's workflow tests it, and publishes
-   `ghcr.io/<owner>/<app>-<modname>:latest` from `master`.
+4. Add a reviewed `.changes/*.json` fragment, then open a pull request. The
+   aggregate workflow discovers and tests the new package automatically.
 
 **After a mod's first successful build, set that package's visibility to
 PUBLIC** on the repo's Packages page. GHCR packages are private by default, and
@@ -238,123 +231,73 @@ These are the failure modes that produce no error, just a mod that does nothing:
 
 ## CI
 
-**One workflow per mod**, each gated on its own directory:
+`ci.yml` runs for every pull request and `master` push. It derives one dynamic
+matrix from the changed paths, expands shared inputs to their Dockerfile
+consumers, and reports one stable branch-protection result: `CI / required`.
+Repository contracts, release-fragment validation, strict documentation, and
+every affected mod's unit, smoke, shell, layer, and manifest checks sit below
+that gate.
 
-```
-.github/workflows/mod-plex-gluetun-portforward-mod.yml
-  on.push.paths: ['mods/plex/gluetun-portforward-mod/**', ...]
-  jobs.ci.uses:  ./.github/workflows/_mod-ci.yml
-```
+Pull requests never publish. A relevant `master` commit is built once as
+`sha-<commit>`, verified from GHCR using the exact manifest headers
+`/docker-mods` sends, and only then promoted remotely to `edge`. The newest 20
+unreleased candidates are retained; candidates backing releases are permanent.
 
-GitHub only supports `paths:` at the workflow level, not per job, so this is
-what actually makes a mod's CI run *only* when that mod changes — touching one
-mod never runs another's tests, and each mod gets its own entry in the Actions
-tab and its own status check. All the logic lives once in the reusable
-`_mod-ci.yml`, so a caller is ~25 generated lines.
+### Release automation
 
-Each caller also triggers on `_mod-ci.yml` itself, so a change to the shared
-pipeline is exercised against every mod.
+Runtime changes require a reviewed `.changes/*.json` fragment. A repository
+GitHub App continually updates one `release/next` pull request, independently
+bumps each affected `VERSION`, writes its package changelog, and records the
+authorized plan. Merging that current, green PR builds or reuses each immutable
+candidate, promotes the exact digest to SemVer aliases and `latest`, attaches
+SBOM and provenance attestations, and publishes one package-scoped Git tag and
+GitHub Release.
 
-### Branches and nightlies
+Release runs are serialized and idempotent. A rerun verifies any completed tag
+and continues; it never rebuilds or rewrites an immutable version. Emergency
+rollback is a separately approved workflow that can temporarily repoint only
+`latest` to an older verified digest. It records that action in the release.
 
-`master` is the release branch and the default branch. `develop` is the
-integration branch, and each mod's workflow carries a `schedule:` that builds it
-nightly.
+The VAAPI mod is the one scheduled exception: a weekly dependency probe
+fingerprints only the Alpine-derived files actually shipped. It opens a reviewed
+patch PR only when those bytes, modes, or symlinks change. Renovate pins the
+Alpine base digest but marks base-only motion `release:none`.
 
-Two things about scheduled runs in GitHub Actions are worth knowing, because
-they are not obvious and they shape this design:
+SemVer is package-specific:
 
-- **`schedule` only ever fires from the default branch's copy of a workflow.**
-  You cannot schedule a workflow to run *on* `develop`. So the nightly runs from
-  `master`'s workflow file and checks `develop` out explicitly. The practical
-  consequence: a mod added on `develop` gets no nightlies until its workflow
-  file reaches `master`.
-- **Everything scheduled for the same minute is queued together**, and GitHub
-  drops scheduled runs under load. `ci/new-mod.sh` therefore derives each mod's
-  cron slot from a hash of its name, spreading them across 02:00–05:59 UTC, and
-  `ci/check-mod-workflows.sh` fails on a collision.
+- **patch** — fixes, dependency refreshes, or internal changes that preserve the
+  documented contract;
+- **minor** — additive behavior, options, or supported platforms;
+- **major** — removed or renamed configuration, user-visible default changes,
+  platform removal, or incompatible runtime requirements.
 
-The cron runs the full test suite every night even when the mod has not changed
-changed — the smoke harnesses pull their current upstream runtime images,
-including Bash, Caddy and LinuxServer Plex, so upstream breakage surfaces in CI
-rather than in someone's container. Only the *publish* is skipped when nothing
-changed, which is what the content-addressed
-`-nightly-<tree-sha>` pin is for: the tag is a combined content hash of
-`mods/<app>/<mod>` and every `shared/` directory its Dockerfile copies, so
-unchanged inputs resolve to a tag that already exists and the push is a no-op
-instead of registry churn. That same dedupe is why a push to `develop` that only
-touched shared CI does not churn every mod's `:nightly`.
+### Repository setup
 
-**A push to `develop` publishes `:nightly` immediately**, the same way a push to
-`master` publishes `:latest`. The cron is a backstop for the tests, not the
-delivery mechanism — without this, `:nightly` would mean "develop as of last
-night", which is a confusing thing to hand someone who just merged a fix and
-wants to try it.
+Release automation requires a repository-installed GitHub App whose id and
+private key are stored as `RELEASE_APP_ID` and `RELEASE_APP_PRIVATE_KEY`. Grant
+only the repository permissions used here: Contents and Pull requests write,
+Packages write, and Administration write for the one-time branch/Pages cutover.
+Protect `master` with required pull requests, current branches, resolved
+conversations, and the single `CI / required` check. A ruleset should restrict
+`<package>/v*` tag creation to the release App and deny tag updates/deletion.
 
-Pushes to feature branches and all pull requests test without publishing. A
-manual `workflow_dispatch` from `master` or `develop` publishes to the matching
-channel without waiting for a commit or for the cron.
+Create `release`, `test-publish`, `rollback`, and `cutover` environments. The
+last three require maintainer approval; merging the rolling release PR is the
+approval for `release`. Install Renovate, leave automerge disabled, and use
+GitHub Actions as the Pages source.
 
-If `develop` does not exist yet, the nightly reports that once as a notice and
-exits cleanly rather than failing red every night.
-
-The cost of this design is that **a mod with no workflow is silently never
-built or tested**. `repo.yml` therefore runs on every push with no paths filter,
-and `ci/check-mod-workflows.sh` fails the build when a mod has no caller, a
-caller points at a mod that no longer exists, a caller passes the wrong mod
-name, or a caller has lost its paths filter. `ci/new-mod.sh` writes a correct
-caller so this normally takes care of itself.
-
-`repo.yml` additionally scaffolds a throwaway mod from `template/` into a temp
-directory and applies the same structural rules a real mod must pass — the
-template is not built by anything, so it would otherwise rot unnoticed.
+After every initial `1.0.0` release is verified, run **Remove develop and
+nightly** once in dry-run mode. Review its exact package-version, branch, and
+Pages-policy targets, then approve the `cutover` environment and repeat with the
+documented confirmation. The workflow deletes legacy nightly tags immediately;
+existing bare commit-SHA pins remain.
 
 ## Documentation
 
-The site is built with MkDocs Material and deployed to GitHub Pages in two
-channels, matching the image tags:
-
-| Site | Built from | Describes |
-| --- | --- | --- |
-| [quwisky.github.io/linuxserver-docker-mods](https://quwisky.github.io/linuxserver-docker-mods/) | `master` | the `:latest` images |
-| [.../nightly/](https://quwisky.github.io/linuxserver-docker-mods/nightly/) | `develop` | the `:nightly` images |
-
-Every page of both sites carries a **channel dropdown in the header**, beside
-the palette toggle, with the channel you are on ticked and the other one a link.
-The nightly site additionally shows a banner, since a dropdown states which
-channel you are on only quietly. Its "view on GitHub" links point at `develop`
-rather than `master`, so a nightly page links to the code it actually documents.
-
-The dropdown is not Material's built-in version selector. That one is driven by
-`mike` and fetches `versions.json` relative to `site_url`, which assumes every
-channel sits in a subdirectory of its own — stable is served at the root here,
-so the fetch would climb out of this Pages site entirely. Both URLs are known at
-build time instead, so `overrides/partials/alternate.html` renders the entries
-directly: no JavaScript, no extra request, and no restructuring of a published
-URL people have already linked to.
-
-That file replaces Material's **language** selector, which is what puts a
-dropdown in that spot. The site is single-language, so the slot is free; the
-override drops the `hreflang` the original emits, because telling a crawler that
-stable and nightly are language variants of one another would be a lie. Material
-still supplies everything around it, including the `.md-select` CSS that opens
-the menu on hover and on keyboard focus.
-
-**Pages allows exactly one deployment per repository**, so the two are not
-deployed independently: every run of the docs workflow rebuilds *both* branches
-into one tree and uploads it as a single artifact. A push to `develop` therefore
-checks `master` out as well, and vice versa. The practical consequences are that
-a deploy always publishes both channels as they stand at that moment, and that
-`.github/workflows/docs.yml` has to exist on **both** branches — a push to
-`master` running an older copy of it would publish a site with no `/nightly/`
-until the next push to `develop` restored it.
-
-If `develop` does not exist, the stable site is published on its own and the
-workflow says so once as a notice. If `develop` exists but does not build,
-`/nightly/` is replaced by a short page saying so and the stable site is
-published anyway — `develop` is the integration branch and is allowed to be
-briefly broken; withholding a good stable site because of it would be the wrong
-way round.
+The site is built once from `master` with MkDocs Material and deployed to
+[GitHub Pages](https://quwisky.github.io/linuxserver-docker-mods/). There is no
+second documentation channel: unreleased images are explicitly identified by
+their `edge` or `test-*` tag instead.
 
 There is no `docs/` directory in the repo. `ci/build-docs.sh` generates one from
 the READMEs — this file becomes the home page, and each `mods/<app>/<mod>/README.md`
@@ -363,10 +306,9 @@ they resolve on the site. Keeping a hand-written second copy of the same content
 would drift, and the READMEs are what GitHub and the GHCR package pages render
 anyway.
 
-[`CHANGELOG.md`](CHANGELOG.md) is published alongside them. It is written by
-hand: history here gets squashed, so a generator reading commit messages would
-have almost nothing to work with, and the useful unit of change is what a new
-image means for someone pulling it.
+The root [`CHANGELOG.md`](CHANGELOG.md) records repository-wide migration
+history. Each package page links to the package-local changelog generated from
+reviewed change fragments.
 
 Build it locally:
 
@@ -377,51 +319,8 @@ mkdocs serve            # http://127.0.0.1:8000
 ```
 
 `mkdocs build --strict` is what CI runs; `--strict` promotes warnings to errors,
-which is what catches a link the generator failed to rewrite. Adding a mod needs
-no docs change — the page and its nav entry appear from the directory tree.
-
-To preview what the nightly site looks like, set the same three variables the
-workflow does. They reach `mkdocs.yml` through its `!ENV` tags, and unset —
-which is every ordinary local build — they give the stable values:
-
-```bash
-DOCS_CHANNEL=nightly DOCS_SOURCE_BRANCH=develop \
-  SITE_NAME='LinuxServer Docker Mods (nightly)' \
-  ci/build-docs.sh && mkdocs serve
-```
-
-`overrides/` holds the repo's only two templates: `partials/alternate.html` for
-the dropdown and `main.html` for the nightly banner. With `DOCS_CHANNEL` unset
-the banner renders nothing and the dropdown ticks Stable — which is what you
-want in a clone.
-
-### Two one-time settings
-
-Both fail in ways that read like a workflow bug rather than a setting, so they
-are worth doing before the first deploy rather than diagnosing afterwards.
-
-1. **Settings → Pages → Source** must be **GitHub Actions**. Until it is,
-   `deploy-pages` fails with a "Pages site not found"-style error.
-2. **Settings → Environments → `github-pages` → Deployment branches** must allow
-   **`develop`** as well as `master`. GitHub restricts that environment to the
-   default branch by default, so a push to `develop` builds both channels
-   perfectly, uploads the artifact, and then fails on the last step with:
-
-   ```
-   Branch "develop" is not allowed to deploy to github-pages
-   due to environment protection rules.
-   ```
-
-   Either add it in the UI, or:
-
-   ```bash
-   gh api --method POST \
-     repos/<owner>/<repo>/environments/github-pages/deployment-branch-policies \
-     -f name='develop' -f type='branch'
-   ```
-
-   This is what lets a change on `develop` reach `/nightly/` without waiting for
-   a push to `master` — which is the entire point of having the channel.
+which catches a link the generator failed to rewrite. Pages must use **GitHub
+Actions** as its source and allow deployments from `master`.
 
 ## Testing
 

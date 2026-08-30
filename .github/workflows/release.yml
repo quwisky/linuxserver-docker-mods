@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+    paths: [.release/plan.json]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Read authorized release plan
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: plan
+        run: |
+          jq -e '.source_sha | type == "string" and length == 40' .release/plan.json >/dev/null
+          source_sha="$(jq -r .source_sha .release/plan.json)"
+          git merge-base --is-ancestor "${source_sha}" "${GITHUB_SHA}" || {
+            echo "::error::release plan source ${source_sha} is not an ancestor of ${GITHUB_SHA}"; exit 1
+          }
+          matrix="$(jq -c '{include: .packages}' .release/plan.json)"
+          count="$(jq '.include | length' <<<"${matrix}")"
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+
+  package:
+    name: Release package matrix
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    uses: ./.github/workflows/_mod-ci.yml
+    with:
+      app: ${{ matrix.app }}
+      mod: ${{ matrix.mod }}
+      platforms: ${{ matrix.platforms }}
+      publish: true
+      moving-tag: edge
+      release-version: ${{ matrix.version }}
+      release-notes: ${{ join(matrix.notes, '\n\n') }}
+      candidate-ref: ${{ matrix.candidate_ref }}
+      candidate-digest: ${{ matrix.candidate_digest }}
+      deployment-environment: release
+    secrets: inherit
+
+  complete:
+    name: Release / complete
+    needs: [plan, package]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          PLAN: ${{ needs.plan.result }}
+          PACKAGE: ${{ needs.package.result }}
+        run: |
+          [[ ${PLAN} == success ]] || { echo "::error::release plan is invalid"; exit 1; }
+          case "${PACKAGE}" in success | skipped) ;; *) echo "::error::one or more package releases failed"; exit 1 ;; esac

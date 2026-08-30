@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: Discover affected packages
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.changes.outputs.matrix }}
+      count: ${{ steps.changes.outputs.count }}
+      release: ${{ steps.changes.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [[ ${EVENT} == pull_request ]]; then
+            base="${PR_BASE}"
+            head="${PR_HEAD}"
+          else
+            base="${BEFORE}"
+            head="${GITHUB_SHA}"
+            if [[ -z ${base} || ${base} =~ ^0+$ ]]; then
+              base="$(git rev-list --max-parents=0 "${head}")"
+            fi
+          fi
+          if [[ ${EVENT} == pull_request ]]; then
+            python3 ci/release.py validate --base "${base}" --head "${head}"
+          fi
+          matrix="$(python3 ci/release.py affected --base "${base}" --head "${head}" | jq -c .)"
+          count="$(jq '.include | length' <<<"${matrix}")"
+          if git diff --name-only "${base}" "${head}" | grep -qxF '.release/plan.json'; then
+            release=true
+          else
+            release=false
+          fi
+          {
+            echo "matrix=${matrix}"
+            echo "count=${count}"
+            echo "release=${release}"
+          } >> "$GITHUB_OUTPUT"
+          jq . <<<"${matrix}"
+
+  repository:
+    name: Repository contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: repository structure and release metadata
+        run: |
+          ci/check-mod-layout.sh
+          ci/check-mod-workflows.sh
+          ci/check-shared-files.sh
+          python3 -m unittest discover -v ci/tests
+          python3 -m py_compile ci/release.py ci/vaapi-fingerprint.py ci/tests/*.py
+      - name: shared and package shell scripts
+        run: |
+          mapfile -t files < <(find ci template shared mods -type f \
+            \( -name run -o -name finish -o -name check -o -name '*.sh' \) | sort)
+          shellcheck -x "${files[@]}"
+      - name: documentation generation is safe
+        run: |
+          log="${RUNNER_TEMP}/build-docs-guard.log"
+          if OUT=mods ci/build-docs.sh >"${log}" 2>&1; then
+            echo "::error::ci/build-docs.sh accepted tracked mods/ as output"; exit 1
+          fi
+          grep -qF 'refusing to replace an existing directory not created by build-docs' "${log}"
+          git diff --exit-code -- mods
+      - name: template still scaffolds a valid mod
+        run: |
+          scratch="$(mktemp -d)"
+          trap 'rm -rf "${scratch}"' EXIT
+          export MODS_DIR="${scratch}/mods" WF_DIR="${scratch}/workflows"
+          (umask 0077; ci/new-mod.sh imgname checkme)
+          ci/check-mod-layout.sh
+          ci/check-mod-workflows.sh
+          docker build -q -f "${MODS_DIR}/imgname/checkme/Dockerfile" -t local/scaffold-check "${scratch}" >/dev/null
+          layers="$(docker image inspect local/scaffold-check --format '{{len .RootFS.Layers}}')"
+          [[ ${layers} == 1 ]]
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+          cache: pip
+          cache-dependency-path: ci/docs-requirements.txt
+      - name: documentation builds strictly
+        run: |
+          python -m pip install -r ci/docs-requirements.txt
+          OUT=docs ci/build-docs.sh
+          mkdocs build --strict
+
+  mod:
+    name: Package matrix
+    needs: changes
+    if: needs.changes.outputs.count != '0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
+    uses: ./.github/workflows/_mod-ci.yml
+    with:
+      app: ${{ matrix.app }}
+      mod: ${{ matrix.mod }}
+      platforms: ${{ matrix.platforms }}
+      publish: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.changes.outputs.release != 'true' }}
+      moving-tag: edge
+      candidate-ref: ${{ matrix.candidate_ref }}
+      candidate-digest: ${{ matrix.candidate_digest }}
+    secrets: inherit
+
+  required:
+    name: CI / required
+    needs: [changes, repository, mod]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          CHANGES: ${{ needs.changes.result }}
+          REPOSITORY: ${{ needs.repository.result }}
+          MOD: ${{ needs.mod.result }}
+        run: |
+          [[ ${CHANGES} == success ]] || { echo "::error::affected-package discovery failed"; exit 1; }
+          [[ ${REPOSITORY} == success ]] || { echo "::error::repository contracts failed"; exit 1; }
+          case "${MOD}" in success | skipped) ;; *) echo "::error::package validation failed"; exit 1 ;; esac

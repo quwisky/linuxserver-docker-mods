@@ -1,295 +1,67 @@
-name: Docs
-
-# Builds the MkDocs Material site and deploys it to GitHub Pages.
-#
-# docs/ is not in the repo: ci/build-docs.sh generates it from the READMEs, which
-# stay the single source of truth. So this triggers on the READMEs themselves,
-# and on the tooling that turns them into a site.
-#
-# TWO CHANNELS, ONE DEPLOYMENT. GitHub Pages allows exactly one deployment per
-# repository, so there is no way to publish master and develop independently.
-# Instead every deploy rebuilds BOTH branches into a single tree -- stable from
-# master at the root, nightly from develop under /nightly/ -- and uploads it as
-# one artifact. That is why a push to develop still checks master out, and why
-# the two builds are not simply "whatever triggered this".
-#
-# The consequence worth knowing: a deploy always publishes both channels as they
-# are at that moment. It is not incremental, and a branch that has moved on since
-# the last run is picked up whether or not it was the one pushed to.
-#
-# A manual run publishes the two channels as they stand on master and develop,
-# whatever branch it was dispatched from -- the channels are defined by those
-# branches, not by the ref that triggered the run. Dispatching from a feature
-# branch validates that branch and publishes nothing from it.
-#
-# BEFORE THE FIRST RUN, two settings, both of which fail like workflow bugs:
-#
-#   1. Settings -> Pages -> Source must be "GitHub Actions", or deploy-pages
-#      fails with a "Pages site not found"-style error.
-#   2. Settings -> Environments -> github-pages -> Deployment branches must
-#      allow `develop` as well as `master`. That environment is restricted to
-#      the default branch by default, so a push to develop builds both channels,
-#      uploads the artifact, and then fails on the deploy step alone with
-#      "Branch develop is not allowed to deploy to github-pages due to
-#      environment protection rules". See the README.
+name: Documentation
 
 on:
-  push:
-    branches: [master, develop]
-    paths:
-      - 'README.md'
-      - 'CHANGELOG.md'
-      - 'mods/**/README.md'
-      - 'mkdocs.yml'
-      - 'overrides/**'
-      - 'ci/build-docs.sh'
-      - 'ci/docs-requirements.txt'
-      - '.github/workflows/docs.yml'
   pull_request:
     paths:
-      - 'README.md'
-      - 'CHANGELOG.md'
+      - README.md
+      - CHANGELOG.md
       - 'mods/**/README.md'
-      - 'mkdocs.yml'
-      - 'overrides/**'
-      - 'ci/build-docs.sh'
-      - 'ci/docs-requirements.txt'
-      - '.github/workflows/docs.yml'
+      - 'mods/**/CHANGELOG.md'
+      - mkdocs.yml
+      - ci/build-docs.sh
+      - ci/docs-requirements.txt
+      - .github/workflows/docs.yml
+  push:
+    branches: [master]
+    paths:
+      - README.md
+      - CHANGELOG.md
+      - 'mods/**/README.md'
+      - 'mods/**/CHANGELOG.md'
+      - mkdocs.yml
+      - ci/build-docs.sh
+      - ci/docs-requirements.txt
+      - .github/workflows/docs.yml
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# One deploy at a time. Cancelling an in-progress *deploy* would leave Pages
-# half-updated, so only queued runs are dropped. Pushes to master and develop
-# share the group deliberately: they publish the same artifact, so letting them
-# overlap is how one channel ends up built from a stale checkout of the other.
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
-  # Does the ref that triggered this still produce a site at all? On a pull
-  # request this is the whole job -- nothing is deployed from a PR.
-  #
-  # Skipped on a push, where `assemble` below builds the same branch with the
-  # same --strict and would only be repeating this. `assemble` therefore does
-  # NOT depend on this job: a skipped dependency skips its dependents.
-  validate:
-    name: validate
-    if: github.event_name != 'push'
+  build:
+    name: Build documentation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.12'
+          python-version: '3.x'
           cache: pip
           cache-dependency-path: ci/docs-requirements.txt
-
-      - name: install mkdocs-material
-        run: pip install -r ci/docs-requirements.txt
-
-      - name: generate docs/ from the READMEs
-        run: ci/build-docs.sh
-
-      - name: build the site
-        # --strict turns warnings into errors, which is what catches a link that
-        # the generator failed to rewrite. Without it a broken link ships.
-        run: mkdocs build --strict
-
-      - name: the channel switcher must actually render
-        # A pull request never reaches `assemble`, so without this nothing in a
-        # PR's CI exercises the switcher at all: a template that renders an
-        # empty dropdown -- a mistyped config key is enough -- builds perfectly
-        # cleanly and merges green. Both channels are checked, because the
-        # nightly side is the one no ordinary build produces.
-        run: |
-          rc=0
-          if ! grep -qF 'md-select__link' site/index.html; then
-            echo "::error::no channel dropdown was rendered; check overrides/partials/alternate.html and extra.alternate"
-            rc=1
-          fi
-          if ! grep -q 'md-channel--current[^>]*>Stable' site/index.html; then
-            echo "::error::the default build does not mark Stable as the current channel"
-            rc=1
-          fi
-
-          # The !ENV path, which nothing else here would touch.
-          DOCS_CHANNEL=nightly mkdocs build --strict --site-dir site-nightly
-          if ! grep -q 'md-channel--current[^>]*>Nightly' site-nightly/index.html; then
-            echo "::error::DOCS_CHANNEL=nightly did not mark Nightly as the current channel"
-            rc=1
-          fi
-          if ! grep -qF 'You are reading the' site-nightly/index.html; then
-            echo "::error::DOCS_CHANNEL=nightly did not render the nightly banner"
-            rc=1
-          fi
-          if grep -qF 'You are reading the' site/index.html; then
-            echo "::error::the default build is showing the nightly banner"
-            rc=1
-          fi
-          exit $rc
-
-  # The published tree. Both channels, every time, whichever branch triggered.
-  assemble:
-    name: assemble both channels
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - name: stable, from master
-        uses: actions/checkout@v7
-        with:
-          ref: master
-          path: stable
-
-      # develop is optional. A repository that has not created it yet should get
-      # a stable-only site and one explanatory notice, not a red X on every push.
-      - name: is there a develop branch?
-        id: nightly
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh api "repos/${GITHUB_REPOSITORY}/branches/develop" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice title=No develop branch::Publishing the stable site only; /nightly/ will be absent until develop exists."
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: nightly, from develop
-        if: steps.nightly.outputs.exists == 'true'
-        uses: actions/checkout@v7
-        with:
-          ref: develop
-          path: nightly
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-          cache: pip
-          cache-dependency-path: stable/ci/docs-requirements.txt
-
-      - name: install mkdocs-material
-        # master's pins, for both builds. Two different Material versions in one
-        # deployment would be a needless way to make the channels differ.
-        run: pip install -r stable/ci/docs-requirements.txt
-
-      # ORDER MATTERS: stable first. `mkdocs build` cleans its --site-dir, and
-      # stable's is the PARENT of nightly's -- building stable second would
-      # delete /nightly/ on the way past.
-      - name: build the stable site
-        working-directory: stable
-        run: |
-          ci/build-docs.sh
-          mkdocs build --strict --site-dir "${GITHUB_WORKSPACE}/site"
-
-      - name: build the nightly site into /nightly/
-        id: nightly_build
-        if: steps.nightly.outputs.exists == 'true'
-        # NOT fatal. develop is the integration branch and is allowed to be
-        # briefly broken; withholding a perfectly good stable site because of it
-        # would be the wrong way round. The next step cleans up and says so.
-        continue-on-error: true
-        working-directory: nightly
-        env:
-          # These three are the only difference between the channels, and they
-          # reach mkdocs.yml through its !ENV tags. On a develop that predates
-          # those tags the build still succeeds -- it just looks like the stable
-          # site, which is why the banner is checked below rather than assumed.
-          SITE_NAME: LinuxServer Docker Mods (nightly)
-          SITE_URL: https://quwisky.github.io/linuxserver-docker-mods/nightly/
-          DOCS_CHANNEL: nightly
-          # Sends every "view this file on GitHub" link to develop rather than
-          # master, so a nightly page links to the code it actually documents.
-          DOCS_SOURCE_BRANCH: develop
-        run: |
-          ci/build-docs.sh
-          mkdocs build --strict --site-dir "${GITHUB_WORKSPACE}/site/nightly"
-
-      - name: develop does not build
-        if: steps.nightly_build.outcome == 'failure'
-        # A half-written site/nightly would be worse than none, and a bare 404
-        # gives a reader nothing to act on -- so replace it with a page that
-        # explains itself and points at the channel that does work.
-        run: |
-          echo "::warning title=Nightly docs not published::develop does not build, so the stable site is published without /nightly/. See the build step above."
-          rm -rf site/nightly
-          mkdir -p site/nightly
-          cat >site/nightly/index.html <<'HTML'
-          <!DOCTYPE html>
-          <html lang="en"><head><meta charset="utf-8">
-          <title>Nightly documentation unavailable</title>
-          <meta name="robots" content="noindex">
-          <style>body{font-family:system-ui,sans-serif;margin:4rem auto;max-width:34rem;line-height:1.6;padding:0 1rem}</style>
-          </head><body>
-          <h1>Nightly documentation unavailable</h1>
-          <p>The <code>develop</code> branch does not currently build, so this
-          channel could not be published. This is a build failure, not a
-          deletion &mdash; it will come back on the next successful run.</p>
-          <p><a href="../">Read the stable documentation</a>, which describes the
-          <code>:latest</code> images.</p>
-          </body></html>
-          HTML
-
-      # Skipped when develop failed to build: the placeholder above is the
-      # expected state then, not a mislabelled channel.
-      - name: the two channels must be distinguishable
-        # Cheap, and it catches the one failure that is otherwise invisible: a
-        # develop whose mkdocs.yml has no !ENV tags builds a nightly site whose
-        # switch says "Stable", so nobody notices they are reading the wrong
-        # channel. Asserted on the rendered HTML rather than on the config,
-        # because the config being right is not the thing that matters.
-        if: steps.nightly.outputs.exists == 'true' && steps.nightly_build.outcome == 'success'
-        run: |
-          rc=0
-          for f in site/index.html site/nightly/index.html; do
-            if [[ ! -f ${f} ]]; then
-              echo "::error::${f} was not built"; rc=1
-            elif ! grep -qF 'md-select__link' "${f}"; then
-              echo "::error::${f} has no channel dropdown in its header"; rc=1
-            fi
-          done
-          ((rc)) && exit $rc
-
-          # Which entry the dropdown marks as current. The anchor is rendered
-          # on one line precisely so this stays a single unambiguous match.
-          current() { grep -o 'md-channel--current[^>]*>[^<]*' "$1" | tr -d ' '; }
-
-          if [[ "$(current site/index.html)" == *Stable* ]]; then
-            echo "the stable site marks Stable as current"
-          else
-            echo "::error::the stable site does not mark Stable as the current channel"; rc=1
-          fi
-          if [[ "$(current site/nightly/index.html)" == *Nightly* ]]; then
-            echo "the nightly site marks Nightly as current"
-          else
-            echo "::warning title=Nightly is not marked::develop's mkdocs.yml has no !ENV tags or no custom_dir, so /nightly/ presents itself as stable. Merge this workflow's mkdocs.yml and overrides/ into develop."
-          fi
-          if [[ "$(current site/index.html)" == *Nightly* ]]; then
-            echo "::error::the STABLE site marks Nightly as the current channel"; rc=1
-          fi
-          # The banner is nightly-only; on stable it must not render at all.
-          if grep -qF 'You are reading the' site/index.html; then
-            echo "::error::the STABLE site is showing the nightly banner"; rc=1
-          fi
-          exit $rc
-
+      - run: python -m pip install -r ci/docs-requirements.txt
+      - run: |
+          OUT=docs ci/build-docs.sh
+          mkdocs build --strict
       - uses: actions/upload-pages-artifact@v5
+        if: github.event_name != 'pull_request'
         with:
           path: site
 
   deploy:
-    name: deploy
-    needs: assemble
+    name: Deploy documentation
+    needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
     steps:
-      - id: deployment
-        uses: actions/deploy-pages@v5
+      - uses: actions/deploy-pages@v5
+        id: deployment

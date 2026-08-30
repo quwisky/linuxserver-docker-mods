@@ -6,16 +6,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Entries that affect a single mod are prefixed with that mod's id, since each mod
 is published as its own GHCR package and people generally care about one of them.
 
-This file is written by hand rather than generated from commit messages. History
-here is squashed, so a generator would have almost nothing to read — and the
-useful unit of change is "what does this mean for someone pulling the image",
-which a commit subject rarely captures.
-
-There are no version tags. Mods publish as `:latest` from `master` and `:nightly`
-from `develop`, with immutable pins alongside, so releases are dated rather than
-numbered. See [Release channels](README.md#release-channels).
+This file now records repository-wide history. Independently versioned package
+history lives beside each mod and is generated from reviewed change fragments.
 
 ## [Unreleased]
+
+### Added
+
+- Independent SemVer releases for every mod, with package-scoped Git tags,
+  GitHub Releases, exact/minor/major GHCR aliases, signed provenance, SBOMs, and
+  digest-preserving promotion from a verified immutable candidate.
+- A repository-native release planner using explicit JSON change fragments,
+  automatic shared-input fan-out, one rolling combined release PR, resumable
+  partial releases, and package-local version/changelog files.
+- Constrained `test-<commit>` publishing, emergency `latest` rollback, bounded
+  event-driven registry retention, Renovate base-digest maintenance, and a
+  weekly shipped-artifact probe for VAAPI runtime updates.
+- A dry-run-first cutover workflow that verifies all replacement releases before
+  deleting legacy nightly package versions, `develop`, and its Pages policy.
+
+### Changed
+
+- Replaced per-mod callers and ambiguous duplicate checks with one affected-mod
+  matrix and the stable `CI / required` branch-protection gate.
+- `master` is the only long-lived branch. Verified unreleased work publishes as
+  `:edge`; stable installs should use the current major tag such as `:1`.
+- Documentation is built once from `master`; the nightly site, channel selector,
+  banner, and dual-branch deployment logic are removed.
 
 ### Fixed
 
@@ -305,4 +322,4 @@ numbered. See [Release channels](README.md#release-channels).
   `/docker-mods` cannot pull a private package — it gets a 401 on the manifest.
 - Licensed under MIT.
 
-[Unreleased]: https://github.com/quwisky/linuxserver-docker-mods/compare/master...develop
+[Unreleased]: https://github.com/quwisky/linuxserver-docker-mods/commits/master

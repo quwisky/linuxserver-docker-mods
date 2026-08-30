@@ -1,15 +1,16 @@
 # Modname - Docker mod for imagename
 
+[Release history](CHANGELOG.md)
+
 One sentence saying what this mod does.
 
 In imagename docker arguments, set an environment variable
-`DOCKER_MODS=ghcr.io/quwisky/imagename-modname:latest`
+`DOCKER_MODS=ghcr.io/quwisky/imagename-modname:1`
 
 If adding multiple mods, enter them in an array separated by `|`, such as
-`DOCKER_MODS=ghcr.io/quwisky/imagename-modname:latest|linuxserver/mods:imagename-mod2`
+`DOCKER_MODS=ghcr.io/quwisky/imagename-modname:1|linuxserver/mods:imagename-mod2`
 
-Nightly builds from `develop` are published as
-`ghcr.io/quwisky/imagename-modname:nightly`.
+Use `:edge` only to test verified, unreleased work from `master`.
 
 ---
 

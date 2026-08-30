@@ -1,0 +1,78 @@
+name: Publish test image
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: Application directory under mods/
+        required: true
+        type: string
+      mod:
+        description: Mod directory under mods/<app>/
+        required: true
+        type: string
+      ref:
+        description: Branch or commit to test
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-image-${{ inputs.app }}-${{ inputs.mod }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      app: ${{ steps.package.outputs.app }}
+      mod: ${{ steps.package.outputs.mod }}
+      platforms: ${{ steps.package.outputs.platforms }}
+      tag: ${{ steps.package.outputs.tag }}
+      sha: ${{ steps.package.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - id: package
+        env:
+          APP: ${{ inputs.app }}
+          MOD: ${{ inputs.mod }}
+        run: |
+          package="$(python3 ci/release.py packages | jq -c --arg app "${APP}" --arg mod "${MOD}" '.[] | select(.app == $app and .mod == $mod)')"
+          [[ -n ${package} ]] || { echo "::error::unknown package ${APP}/${MOD}"; exit 1; }
+          sha="$(git rev-parse HEAD)"
+          {
+            echo "app=${APP}"
+            echo "mod=${MOD}"
+            echo "platforms=$(jq -r .platforms <<<"${package}")"
+            echo "tag=test-${sha:0:12}"
+            echo "sha=${sha}"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: resolve
+    uses: ./.github/workflows/_mod-ci.yml
+    with:
+      app: ${{ needs.resolve.outputs.app }}
+      mod: ${{ needs.resolve.outputs.mod }}
+      platforms: ${{ needs.resolve.outputs.platforms }}
+      source-ref: ${{ needs.resolve.outputs.sha }}
+      publish: true
+      moving-tag: ${{ needs.resolve.outputs.tag }}
+      deployment-environment: test-publish
+    secrets: inherit
+
+  cleanup:
+    needs: [resolve, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE: ${{ needs.resolve.outputs.app }}-${{ needs.resolve.outputs.mod }}
+        run: ci/cleanup-package-tags.sh "${PACKAGE}" test 5

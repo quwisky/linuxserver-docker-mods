@@ -1,17 +1,18 @@
 # Gluetun port forward - Docker mod for plex
 
+[Release history](CHANGELOG.md)
+
 This mod keeps Plex's public remote-access port in sync with the port your VPN
 provider forwards through [gluetun](https://github.com/qdm12/gluetun).
 
 In plex docker arguments, set an environment variable
-`DOCKER_MODS=ghcr.io/quwisky/plex-gluetun-portforward-mod:latest`
+`DOCKER_MODS=ghcr.io/quwisky/plex-gluetun-portforward-mod:1`
 
 If adding multiple mods, enter them in an array separated by `|`, such as
-`DOCKER_MODS=ghcr.io/quwisky/plex-gluetun-portforward-mod:latest|linuxserver/mods:plex-absolute-hama`
+`DOCKER_MODS=ghcr.io/quwisky/plex-gluetun-portforward-mod:1|linuxserver/mods:plex-absolute-hama`
 
-Nightly builds from `develop` are published as
-`ghcr.io/quwisky/plex-gluetun-portforward-mod:nightly`. A container only
-re-applies a mod when it is recreated, not restarted, so use
+Use `:edge` only to test verified, unreleased work from `master`. A container
+only re-applies a mod when it is recreated, not restarted, so use
 `docker compose up -d --force-recreate plex` to pick one up.
 
 ---
@@ -143,7 +144,7 @@ services:
       - TZ=Europe/Amsterdam
       - VERSION=docker
       - PLEX_CLAIM=claim-xxxxxxxxxxxxxxxxxxxx
-      - DOCKER_MODS=ghcr.io/quwisky/plex-gluetun-portforward-mod:latest
+      - DOCKER_MODS=ghcr.io/quwisky/plex-gluetun-portforward-mod:1
       # Everything below is optional and shown at its default.
       # - GLUETUN_PF_CONTROL_URL=http://localhost:8000
       # - GLUETUN_PF_PLEX_URL=http://localhost:32400
@@ -550,17 +551,17 @@ self-healing.
    the repo's Packages page. GHCR packages are private by default, and
    `/docker-mods` inside the Plex container then gets a 401 pulling the
    manifest. This is the single most common "my mod doesn't load" cause.
-5. Point `DOCKER_MODS` at `ghcr.io/<your-user>/plex-gluetun-portforward-mod:latest`.
+5. Point `DOCKER_MODS` at `ghcr.io/<your-user>/plex-gluetun-portforward-mod:1`.
 
 Published tags:
 
-| Tag | From | Notes |
-| --- | --- | --- |
-| `:latest` | `master` | What you want. |
-| `:<commit-sha>` | `master` | Immutable pin of the above. |
-| `:nightly` | `develop` | Changes before they reach `:latest`. |
-| `:nightly-<tree-sha>` | `develop` | Immutable nightly pin. |
-| `:<your-tag>` | any branch | A manual run with the **tag** field filled in. Publishes that tag alone, leaving `:latest` and `:nightly` untouched. |
+| Tag | Notes |
+| --- | --- |
+| `:1` | Recommended compatible-release channel. |
+| `:1.2.3` | Exact immutable release. |
+| `:latest` | Newest release, including future breaking majors. |
+| `:edge` | Verified, unreleased `master`; testing only. |
+| `:test-<commit>` | Short-lived, maintainer-approved feature image. |
 
 Note that a plain `docker compose restart plex` reuses the cached mod and skips
 re-applying it when the layer digest is unchanged. Use

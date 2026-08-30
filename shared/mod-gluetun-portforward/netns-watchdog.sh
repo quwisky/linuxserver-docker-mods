@@ -10,10 +10,8 @@
 # to make that reachable.
 #
 # Editing this file therefore changes several published images at once.
-# ci/check-shared-files.sh keeps that honest -- every mod copying this directory
-# must carry a paths filter for it, so its tests and its build actually run, and
-# ci/mod-inputs.sh folds it into the nightly content hash so the publish is not
-# deduped away.
+# Central affected-package discovery follows every Dockerfile consumer, so all
+# of those packages are validated and published from the same shared change.
 #
 # No shebang: this is sourced, never executed. It is deliberately NOT executable,
 # which also keeps it out of the executable-bit check CI applies to run/finish.
