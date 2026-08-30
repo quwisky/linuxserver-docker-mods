@@ -11,6 +11,43 @@ rc=0
 
 err() { printf '::error::%s\n' "$*"; }
 
+check_verifier_credentials() {
+    local workflow="$1"
+
+    awk -v workflow="${workflow}" '
+        function check_step() {
+            if (!invokes_verifier) {
+                return
+            }
+            if (!has_user) {
+                printf "::error::%s verifier step %s is missing GH_USER.\n", workflow, step
+                failed = 1
+            }
+            if (!has_pass) {
+                printf "::error::%s verifier step %s is missing GH_PASS.\n", workflow, step
+                failed = 1
+            }
+        }
+
+        /^      - (name|uses):/ {
+            check_step()
+            step = $0
+            sub(/^      - /, "", step)
+            invokes_verifier = 0
+            has_user = 0
+            has_pass = 0
+        }
+        index($0, ".trusted/ci/verify-published-mod.sh") { invokes_verifier = 1 }
+        /^          GH_USER: \$\{\{ github\.actor \}\}$/ { has_user = 1 }
+        /^          GH_PASS: \$\{\{ secrets\.GITHUB_TOKEN \}\}$/ { has_pass = 1 }
+
+        END {
+            check_step()
+            exit failed
+        }
+    ' "${workflow}"
+}
+
 ids=()
 paths=()
 for dockerfile in "${MODS_DIR}"/*/*/Dockerfile; do
@@ -126,6 +163,9 @@ if [[ ${WF_DIR} == .github/workflows ]]; then
                 rc=1
             }
         done
+        if ! check_verifier_credentials "${publisher}"; then
+            rc=1
+        fi
     fi
     if [[ -f ${release_please} ]]; then
         grep -qF 'googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7' \
