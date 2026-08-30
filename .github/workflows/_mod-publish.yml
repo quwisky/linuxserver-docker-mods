@@ -353,6 +353,7 @@ jobs:
         if: inputs.release-version != ''
         env:
           GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
           PACKAGE: ${{ steps.candidate.outputs.package }}
           DIGEST: ${{ steps.digest.outputs.value }}
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
