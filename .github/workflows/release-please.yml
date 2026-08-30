@@ -16,6 +16,9 @@ jobs:
     name: Update release PR or create draft releases
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
@@ -28,6 +31,10 @@ jobs:
           target-branch: master
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+      - name: keep release pull request current
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: ci/sync-release-pr.sh
       - name: summarize Release Please result
         env:
           RELEASES_CREATED: ${{ steps.release.outputs.releases_created }}

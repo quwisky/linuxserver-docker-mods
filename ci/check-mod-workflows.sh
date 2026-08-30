@@ -173,6 +173,13 @@ if [[ ${WF_DIR} == .github/workflows ]]; then
             err "${release_please} must pin the reviewed Release Please action commit."
             rc=1
         }
+        for guard in 'actions/checkout@v7' 'ci/sync-release-pr.sh' \
+            "GH_TOKEN: \${{ steps.app-token.outputs.token }}"; do
+            grep -qF "${guard}" "${release_please}" || {
+                err "${release_please} is missing release-branch synchronization guard: ${guard}"
+                rc=1
+            }
+        done
         if grep -qF 'workflow_dispatch:' "${release_please}"; then
             err "${release_please} must not expose a manual release bypass."
             rc=1
