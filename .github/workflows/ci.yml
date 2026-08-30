@@ -2,8 +2,6 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -144,42 +142,10 @@ jobs:
       app: ${{ matrix.app }}
       mod: ${{ matrix.mod }}
       platforms: ${{ matrix.platforms }}
-    secrets: inherit
-
-  edge:
-    name: Publish edge matrix
-    needs: [changes, repository, mod]
-    if: >-
-      github.event_name == 'push'
-      && github.ref == 'refs/heads/master'
-      && needs.changes.outputs.release != 'true'
-      && needs.changes.outputs.count != '0'
-      && needs.repository.result == 'success'
-      && (needs.mod.result == 'success' || needs.mod.result == 'skipped')
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
-    uses: ./.github/workflows/_mod-publish.yml
-    with:
-      app: ${{ matrix.app }}
-      mod: ${{ matrix.mod }}
-      platforms: ${{ matrix.platforms }}
-      run-tests: false
-      publish: true
-      moving-tag: edge
-      candidate-ref: ${{ matrix.candidate_ref }}
-      candidate-digest: ${{ matrix.candidate_digest }}
-      deployment-environment: release
-    secrets: inherit
 
   required:
     name: CI / required
-    needs: [changes, repository, mod, edge]
+    needs: [changes, repository, mod]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -187,9 +153,7 @@ jobs:
           CHANGES: ${{ needs.changes.result }}
           REPOSITORY: ${{ needs.repository.result }}
           MOD: ${{ needs.mod.result }}
-          EDGE: ${{ needs.edge.result }}
         run: |
           [[ ${CHANGES} == success ]] || { echo "::error::affected-package discovery failed"; exit 1; }
           [[ ${REPOSITORY} == success ]] || { echo "::error::repository contracts failed"; exit 1; }
           case "${MOD}" in success | skipped) ;; *) echo "::error::package validation failed"; exit 1 ;; esac
-          case "${EDGE}" in success | skipped) ;; *) echo "::error::edge publication failed"; exit 1 ;; esac

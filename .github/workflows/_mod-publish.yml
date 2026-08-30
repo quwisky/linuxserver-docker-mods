@@ -76,6 +76,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.source-ref || github.sha }}
+          persist-credentials: false
 
       - name: mod directory exists and is shaped like a mod
         run: |
@@ -171,7 +172,7 @@ jobs:
       id-token: write
       attestations: write
     env:
-      DIR: mods/${{ inputs.app }}/${{ inputs.mod }}
+      DIR: .source/mods/${{ inputs.app }}/${{ inputs.mod }}
       ID: ${{ inputs.app }}-${{ inputs.mod }}
       PLATFORMS: ${{ inputs.platforms }}
       MOVING_TAG: ${{ inputs.moving-tag }}
@@ -182,10 +183,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          path: .trusted
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
           ref: ${{ inputs.source-ref || github.sha }}
+          path: .source
+          persist-credentials: false
       - name: record checked-out source
         id: source
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: echo "sha=$(git -C .source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - id: owner
         run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v4
@@ -243,7 +250,7 @@ jobs:
         id: build
         if: steps.candidate.outputs.build == 'true'
         with:
-          context: .
+          context: .source
           file: ${{ env.DIR }}/Dockerfile
           platforms: ${{ inputs.platforms }}
           provenance: false
@@ -266,7 +273,7 @@ jobs:
           digest="${BUILT_DIGEST:-${RESOLVED_DIGEST}}"
           [[ ${digest} == sha256:* ]] || { echo "::error::candidate digest is missing"; exit 1; }
           docker buildx imagetools inspect "${CANDIDATE}@${digest}" >/dev/null
-          ci/verify-published-mod.sh "${CANDIDATE}@${digest}"
+          .trusted/ci/verify-published-mod.sh "${CANDIDATE}@${digest}"
           echo "value=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: promote the verified digest
@@ -300,7 +307,7 @@ jobs:
               }
             else
               docker buildx imagetools create "${options[@]}" --tag "${exact}" "${source}"
-              ci/verify-published-mod.sh "${exact}"
+              .trusted/ci/verify-published-mod.sh "${exact}"
             fi
             tags+=("${release_major}.${release_minor}" "${release_major}" latest)
           fi
@@ -309,7 +316,7 @@ jobs:
             if [[ ${target} != "${CANDIDATE}" ]]; then
               docker buildx imagetools create "${options[@]}" --tag "${target}" "${source}"
             fi
-            ci/verify-published-mod.sh "${target}"
+            .trusted/ci/verify-published-mod.sh "${target}"
             printf '%s\n' "${target}"
           done
 
@@ -400,4 +407,4 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ci/cleanup-package-tags.sh "${ID}" candidates 20
+        run: .trusted/ci/cleanup-package-tags.sh "${ID}" candidates 20

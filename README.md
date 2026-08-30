@@ -97,6 +97,7 @@ ci/                             scaffolding and the repo-wide checks
 .dockerignore                   context is the repo root, so this lives here
 .github/workflows/
   ci.yml                        affected-package matrix and required gate
+  edge.yml                      trusted master-only edge publication
   _mod-ci.yml                   reusable read-only package validation
   _mod-publish.yml              trusted candidate publication and promotion
   release-pr.yml                rolling combined release PR
@@ -232,14 +233,15 @@ These are the failure modes that produce no error, just a mod that does nothing:
 
 ## CI
 
-`ci.yml` runs for every pull request and `master` push. It derives one dynamic
+`ci.yml` runs for every pull request. It derives one dynamic
 matrix from the changed paths, expands shared inputs to their Dockerfile
 consumers, and reports one stable branch-protection result: `CI / required`.
 Repository contracts, release-fragment validation, strict documentation, and
 every affected mod's unit, smoke, shell, layer, and manifest checks sit below
 that gate.
 
-Pull requests never publish. A relevant `master` commit is built once as
+Pull requests never receive secrets or publication permissions. The separate
+master-push-only `edge.yml` validates each relevant package, builds it once as
 `sha-<commit>`, verified from GHCR using the exact manifest headers
 `/docker-mods` sends, and only then promoted remotely to `edge`. The newest 20
 unreleased candidates are retained; candidates backing releases are permanent.

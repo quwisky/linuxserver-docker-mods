@@ -49,6 +49,7 @@ if [[ ${WF_DIR} == .github/workflows ]]; then
     ci="${WF_DIR}/ci.yml"
     reusable="${WF_DIR}/_mod-ci.yml"
     publisher="${WF_DIR}/_mod-publish.yml"
+    edge="${WF_DIR}/edge.yml"
     if [[ ! -f ${ci} ]]; then
         err "${ci} is missing; CI would have no aggregate required check."
         rc=1
@@ -59,6 +60,10 @@ if [[ ${WF_DIR} == .github/workflows ]]; then
     fi
     if [[ ! -f ${publisher} ]]; then
         err "${publisher} is missing; trusted candidates could not be published."
+        rc=1
+    fi
+    if [[ ! -f ${edge} ]]; then
+        err "${edge} is missing; trusted master commits could not publish edge images."
         rc=1
     fi
     for legacy in "${WF_DIR}"/mod-*.yml; do
@@ -79,12 +84,35 @@ if [[ ${WF_DIR} == .github/workflows ]]; then
             err "${ci} does not call the shared mod workflow."
             rc=1
         }
-        grep -qF './.github/workflows/_mod-publish.yml' "${ci}" || {
-            err "${ci} does not call the trusted publication workflow."
+        if grep -qF './.github/workflows/_mod-publish.yml' "${ci}"; then
+            err "${ci} must not expose trusted publication to pull requests."
+            rc=1
+        fi
+        if grep -qF 'secrets: inherit' "${ci}"; then
+            err "${ci} must not pass repository secrets to pull-request jobs."
+            rc=1
+        fi
+    fi
+    if [[ -f ${edge} ]]; then
+        grep -qF 'branches: [master]' "${edge}" || {
+            err "${edge} is not restricted to master pushes."
+            rc=1
+        }
+        grep -qF './.github/workflows/_mod-publish.yml' "${edge}" || {
+            err "${edge} does not call the trusted publication workflow."
             rc=1
         }
     fi
-    for workflow in "${ci}" "${reusable}" "${publisher}"; do
+    if [[ -f ${publisher} ]]; then
+        for guard in 'path: .trusted' 'path: .source' 'context: .source' \
+            '.trusted/ci/verify-published-mod.sh'; do
+            grep -qF "${guard}" "${publisher}" || {
+                err "${publisher} is missing trusted/source isolation guard: ${guard}"
+                rc=1
+            }
+        done
+    fi
+    for workflow in "${ci}" "${reusable}" "${publisher}" "${edge}"; do
         [[ -f ${workflow} ]] || continue
         if grep -Eq 'refs/heads/develop|(^|[^A-Za-z])nightly([^A-Za-z]|$)' "${workflow}"; then
             err "${workflow} still references the removed develop/nightly channel."
