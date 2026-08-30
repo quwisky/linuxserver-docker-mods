@@ -65,9 +65,19 @@ unchanged. `docker compose up -d --force-recreate <service>` picks up a release.
 
 ### Testing unreleased work
 
-Pull requests build and test without publishing. A maintainer can run **Publish
-test image**, select an app, mod, and ref, approve the `test-publish`
-environment, and receive a constrained `test-<commit>` tag:
+Pull requests build and test without publishing. A maintainer requests a test
+image through the default-branch-only repository event, then approves the
+`test-publish` environment:
+
+```bash
+gh api --method POST repos/quwisky/linuxserver-docker-mods/dispatches \
+  -f event_type=publish-test-image \
+  -f 'client_payload[app]=plex' \
+  -f 'client_payload[mod]=vaapi-amdgpu-mod' \
+  -f 'client_payload[ref]=feature-branch'
+```
+
+The run returns a constrained `test-<commit>` tag:
 
 ```yaml
   - DOCKER_MODS=ghcr.io/quwisky/plex-vaapi-amdgpu-mod:test-a1b2c3d4e5f6

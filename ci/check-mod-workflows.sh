@@ -50,6 +50,7 @@ if [[ ${WF_DIR} == .github/workflows ]]; then
     reusable="${WF_DIR}/_mod-ci.yml"
     publisher="${WF_DIR}/_mod-publish.yml"
     edge="${WF_DIR}/edge.yml"
+    test_publisher="${WF_DIR}/test-image.yml"
     if [[ ! -f ${ci} ]]; then
         err "${ci} is missing; CI would have no aggregate required check."
         rc=1
@@ -64,6 +65,10 @@ if [[ ${WF_DIR} == .github/workflows ]]; then
     fi
     if [[ ! -f ${edge} ]]; then
         err "${edge} is missing; trusted master commits could not publish edge images."
+        rc=1
+    fi
+    if [[ ! -f ${test_publisher} ]]; then
+        err "${test_publisher} is missing; maintainers could not request test images."
         rc=1
     fi
     for legacy in "${WF_DIR}"/mod-*.yml; do
@@ -112,7 +117,17 @@ if [[ ${WF_DIR} == .github/workflows ]]; then
             }
         done
     fi
-    for workflow in "${ci}" "${reusable}" "${publisher}" "${edge}"; do
+    if [[ -f ${test_publisher} ]]; then
+        grep -qF 'repository_dispatch:' "${test_publisher}" || {
+            err "${test_publisher} must load only from the default branch."
+            rc=1
+        }
+        if grep -qF 'workflow_dispatch:' "${test_publisher}"; then
+            err "${test_publisher} must not load privileged code from a selected ref."
+            rc=1
+        fi
+    fi
+    for workflow in "${ci}" "${reusable}" "${publisher}" "${edge}" "${test_publisher}"; do
         [[ -f ${workflow} ]] || continue
         if grep -Eq 'refs/heads/develop|(^|[^A-Za-z])nightly([^A-Za-z]|$)' "${workflow}"; then
             err "${workflow} still references the removed develop/nightly channel."

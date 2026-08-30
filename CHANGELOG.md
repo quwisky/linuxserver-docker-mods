@@ -37,9 +37,9 @@ history lives beside each mod and is generated from reviewed change fragments.
 ### Fixed
 
 - Pull-request validation is isolated from the master-only publisher and no
-  longer inherits repository secrets. Manual test builds use untrusted refs
-  only as credential-free source contexts while verification tooling remains
-  pinned to trusted `master`.
+  longer inherits repository secrets. Test publishing loads only from the
+  default branch, uses untrusted refs solely as credential-free source
+  contexts, and keeps verification tooling pinned to trusted `master`.
 - Repository tooling now refuses to replace existing non-generated or
   out-of-repository paths during documentation generation, preserves template
   file modes even under a restrictive umask, verifies every architecture below
