@@ -25,8 +25,6 @@ Conventional Commit pull-request titles.
 - Constrained `test-<commit>` publishing, emergency `latest` rollback, bounded
   event-driven registry retention, Renovate base-digest maintenance, and a
   weekly shipped-artifact probe for VAAPI runtime updates.
-- A dry-run-first cutover workflow that verifies all replacement releases before
-  deleting legacy nightly package versions, `develop`, and its Pages policy.
 
 ### Changed
 
@@ -39,6 +37,8 @@ Conventional Commit pull-request titles.
   `:edge`; stable installs should use the current major tag such as `:1`.
 - Documentation is built once from `master`; the nightly site, channel selector,
   banner, and dual-branch deployment logic are removed.
+- Removed the one-time nightly-package and `develop` migration automation after
+  the migration completed.
 
 ### Fixed
 
