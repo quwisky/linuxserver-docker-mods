@@ -41,7 +41,8 @@ jobs:
           if [[ -f .release/plan.json ]]; then
             while IFS=$'\t' read -r id version; do
               [[ -n ${id} ]] || continue
-              gh release view "${id}/v${version}" >/dev/null 2>&1 || {
+              state="$(gh release view "${id}/v${version}" --json isDraft --jq .isDraft 2>/dev/null || true)"
+              [[ ${state} == false ]] || {
                 echo "::error::${id} v${version} is still incomplete; rerun its release before planning another"
                 exit 1
               }

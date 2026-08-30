@@ -32,6 +32,7 @@ jobs:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           if [[ ${EVENT} == pull_request ]]; then
             base="${PR_BASE}"
@@ -51,8 +52,8 @@ jobs:
           if git diff --name-only "${base}" "${head}" | grep -qxF '.release/plan.json'; then
             release=true
             if [[ ${EVENT} == pull_request ]]; then
-              [[ ${PR_HEAD_REF} == release/next ]] || {
-                echo "::error::.release/plan.json may only change through the App-managed release/next branch"
+              [[ ${PR_HEAD_REF} == release/next && ${PR_HEAD_REPO} == "${GITHUB_REPOSITORY}" ]] || {
+                echo "::error::.release/plan.json may only change through this repository's App-managed release/next branch"
                 exit 1
               }
               unexpected="$(git diff --name-only "${base}" "${head}" | grep -Ev \

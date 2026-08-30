@@ -15,7 +15,8 @@ REFERENCE="$1"
 
 ref="${REFERENCE#ghcr.io/}"
 if [[ ${ref} == *@sha256:* ]]; then
-    repo="${ref%%@*}"
+    tagged="${ref%%@*}"
+    repo="${tagged%%:*}"
     selector="${ref#*@}"
 else
     repo="${ref%%:*}"
