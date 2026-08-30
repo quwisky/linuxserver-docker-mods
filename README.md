@@ -319,7 +319,7 @@ Release automation requires a repository-installed GitHub App whose id and
 private key are stored as `RELEASE_APP_ID` and `RELEASE_APP_PRIVATE_KEY`. Set
 the exact App bot login in the `RELEASE_APP_LOGIN` repository variable. Grant
 only the repository permissions used here: Contents, Pull requests, and Issues
-write, plus Administration write for the one-time branch/Pages cutover.
+write.
 Protect `master` with required pull requests, current branches, resolved
 conversations, and the single `CI / required` check. A ruleset should restrict
 `<package>/v*` tag creation to the release App and deny tag updates/deletion.
@@ -327,16 +327,10 @@ Restrict updates to `release-please--branches--master` to that App as well; CI
 rejects generated release changes from every other branch and validates the
 branch's allowed file structure.
 
-Create `release`, `test-publish`, `rollback`, and `cutover` environments. The
-four require maintainer approval. Install Renovate, leave automerge disabled,
+Create `release`, `test-publish`, and `rollback` environments. All three require
+maintainer approval. Install Renovate, leave automerge disabled,
 review its pinned Release Please Action updates, and use GitHub Actions as the
 Pages source.
-
-After every initial `1.0.0` release is verified, run **Remove develop and
-nightly** once in dry-run mode. Review its exact package-version, branch, and
-Pages-policy targets, then approve the `cutover` environment and repeat with the
-documented confirmation. The workflow deletes legacy nightly tags immediately;
-existing bare commit-SHA pins remain.
 
 ## Documentation
 
