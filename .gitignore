@@ -1,7 +1,9 @@
 .DS_Store
 *.tar
 /test/.out/
-/docs/
+/docs/*
+!/docs/agents/
+!/docs/agents/*.md
 /site/
 __pycache__/
 *.pyc

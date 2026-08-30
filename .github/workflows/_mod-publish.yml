@@ -276,6 +276,8 @@ jobs:
         id: promote
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_USER: ${{ github.actor }}
+          GH_PASS: ${{ secrets.GITHUB_TOKEN }}
           PACKAGE: ${{ steps.candidate.outputs.package }}
           CANDIDATE: ${{ steps.candidate.outputs.ref }}
           DIGEST: ${{ steps.digest.outputs.value }}

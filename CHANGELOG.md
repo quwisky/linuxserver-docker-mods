@@ -14,6 +14,8 @@ Conventional Commit pull-request titles.
 
 ### Added
 
+- Repository-local engineering-skill configuration for GitHub Issues, default
+  triage labels, and single-context domain documentation.
 - Independent SemVer releases for every mod, with package-scoped Git tags,
   GitHub Releases, exact/minor/major GHCR aliases, signed provenance, SBOMs, and
   digest-preserving promotion from a verified immutable candidate.
@@ -40,6 +42,12 @@ Conventional Commit pull-request titles.
 
 ### Fixed
 
+- App-owned Release Please pull requests now update themselves from `master`
+  after non-release commits, avoiding a deadlock between strict up-to-date
+  checks and the rule that prevents humans from updating the release branch.
+- Digest promotion now passes the registry credentials required by the trusted
+  published-image verifier, preventing edge and release publication from
+  failing after a candidate image has already been pushed successfully.
 - Pull-request validation is isolated from the master-only publisher and no
   longer inherits repository secrets. Test publishing loads only from the
   default branch, uses untrusted refs solely as credential-free source
