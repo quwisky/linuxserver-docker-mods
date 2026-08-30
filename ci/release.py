@@ -435,6 +435,7 @@ def affected_packages(repo: Path, base: str, head: str) -> dict[str, list[dict[s
     global_ci = {
         ".dockerignore",
         ".github/workflows/_mod-ci.yml",
+        ".github/workflows/_mod-publish.yml",
         ".github/workflows/ci.yml",
         "ci/release.py",
         "ci/mod-inputs.sh",

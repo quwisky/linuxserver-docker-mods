@@ -144,7 +144,6 @@ jobs:
       app: ${{ matrix.app }}
       mod: ${{ matrix.mod }}
       platforms: ${{ matrix.platforms }}
-      publish: false
     secrets: inherit
 
   edge:
@@ -165,7 +164,7 @@ jobs:
       packages: write
       id-token: write
       attestations: write
-    uses: ./.github/workflows/_mod-ci.yml
+    uses: ./.github/workflows/_mod-publish.yml
     with:
       app: ${{ matrix.app }}
       mod: ${{ matrix.mod }}

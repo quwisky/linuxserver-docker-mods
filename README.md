@@ -97,7 +97,8 @@ ci/                             scaffolding and the repo-wide checks
 .dockerignore                   context is the repo root, so this lives here
 .github/workflows/
   ci.yml                        affected-package matrix and required gate
-  _mod-ci.yml                   reusable package validation and publication
+  _mod-ci.yml                   reusable read-only package validation
+  _mod-publish.yml              trusted candidate publication and promotion
   release-pr.yml                rolling combined release PR
   release.yml                   digest promotion and GitHub Releases
 ```

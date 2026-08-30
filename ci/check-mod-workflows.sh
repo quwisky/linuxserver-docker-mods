@@ -48,12 +48,17 @@ done
 if [[ ${WF_DIR} == .github/workflows ]]; then
     ci="${WF_DIR}/ci.yml"
     reusable="${WF_DIR}/_mod-ci.yml"
+    publisher="${WF_DIR}/_mod-publish.yml"
     if [[ ! -f ${ci} ]]; then
         err "${ci} is missing; CI would have no aggregate required check."
         rc=1
     fi
     if [[ ! -f ${reusable} ]]; then
         err "${reusable} is missing; affected packages could not be tested."
+        rc=1
+    fi
+    if [[ ! -f ${publisher} ]]; then
+        err "${publisher} is missing; trusted candidates could not be published."
         rc=1
     fi
     for legacy in "${WF_DIR}"/mod-*.yml; do
@@ -74,8 +79,12 @@ if [[ ${WF_DIR} == .github/workflows ]]; then
             err "${ci} does not call the shared mod workflow."
             rc=1
         }
+        grep -qF './.github/workflows/_mod-publish.yml' "${ci}" || {
+            err "${ci} does not call the trusted publication workflow."
+            rc=1
+        }
     fi
-    for workflow in "${ci}" "${reusable}"; do
+    for workflow in "${ci}" "${reusable}" "${publisher}"; do
         [[ -f ${workflow} ]] || continue
         if grep -Eq 'refs/heads/develop|(^|[^A-Za-z])nightly([^A-Za-z]|$)' "${workflow}"; then
             err "${workflow} still references the removed develop/nightly channel."

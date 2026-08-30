@@ -60,7 +60,7 @@ jobs:
       packages: write
       id-token: write
       attestations: write
-    uses: ./.github/workflows/_mod-ci.yml
+    uses: ./.github/workflows/_mod-publish.yml
     with:
       app: ${{ needs.resolve.outputs.app }}
       mod: ${{ needs.resolve.outputs.mod }}

@@ -51,7 +51,7 @@ jobs:
       packages: write
       id-token: write
       attestations: write
-    uses: ./.github/workflows/_mod-ci.yml
+    uses: ./.github/workflows/_mod-publish.yml
     with:
       app: ${{ matrix.app }}
       mod: ${{ matrix.mod }}
