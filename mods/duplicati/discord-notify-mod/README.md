@@ -1,18 +1,19 @@
 # Discord notify - Docker mod for duplicati
 
+[Release history](CHANGELOG.md)
+
 This mod posts a colour-coded Discord embed after every Duplicati operation,
 with the statistics, the destination and — when something went wrong — the
 errors Duplicati actually reported.
 
 In duplicati docker arguments, set an environment variable
-`DOCKER_MODS=ghcr.io/quwisky/duplicati-discord-notify-mod:latest`
+`DOCKER_MODS=ghcr.io/quwisky/duplicati-discord-notify-mod:1`
 
 If adding multiple mods, enter them in an array separated by `|`, such as
-`DOCKER_MODS=ghcr.io/quwisky/duplicati-discord-notify-mod:latest|linuxserver/mods:universal-cron`
+`DOCKER_MODS=ghcr.io/quwisky/duplicati-discord-notify-mod:1|linuxserver/mods:universal-cron`
 
-Nightly builds from `develop` are published as
-`ghcr.io/quwisky/duplicati-discord-notify-mod:nightly`. A container only
-re-applies a mod when it is recreated, not restarted, so use
+Use `:edge` only to test verified, unreleased work from `master`. A container
+only re-applies a mod when it is recreated, not restarted, so use
 `docker compose up -d --force-recreate duplicati` to pick one up.
 
 ---
@@ -121,7 +122,7 @@ services:
       # Required by Duplicati 2.3+, and nothing to do with this mod: without it
       # the container never finishes starting. At least 8 characters.
       - SETTINGS_ENCRYPTION_KEY=<a long random string>
-      - DOCKER_MODS=ghcr.io/quwisky/duplicati-discord-notify-mod:latest
+      - DOCKER_MODS=ghcr.io/quwisky/duplicati-discord-notify-mod:1
       - DISCORD_WEBHOOK_URL_FILE=/run/secrets/discord_webhook
       - DISCORD_NOTIFY_ON=all
     volumes:
@@ -339,13 +340,13 @@ not into `docker logs`, because Duplicati is what invokes it.
 
 Published tags:
 
-| Tag | From | Notes |
-| --- | --- | --- |
-| `:latest` | `master` | What you want. |
-| `:<commit-sha>` | `master` | Immutable pin of the above. |
-| `:nightly` | `develop` | Changes before they reach `:latest`. |
-| `:nightly-<tree-sha>` | `develop` | Immutable nightly pin. |
-| `:<your-tag>` | any branch | A manual run with the **tag** field filled in. Publishes that tag alone. |
+| Tag | Notes |
+| --- | --- |
+| `:1` | Recommended compatible-release channel. |
+| `:1.2.3` | Exact immutable release. |
+| `:latest` | Newest release, including future breaking majors. |
+| `:edge` | Verified, unreleased `master`; testing only. |
+| `:test-<commit>` | Short-lived, maintainer-approved feature image. |
 
 ## Local development
 

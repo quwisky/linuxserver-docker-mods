@@ -1,0 +1,99 @@
+name: Emergency rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Full package id, e.g. plex-vaapi-amdgpu-mod
+        required: true
+        type: string
+      version:
+        description: Previously verified SemVer version
+        required: true
+        type: string
+      confirm:
+        description: Type ROLLBACK <package> TO <version>
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  rollback:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    environment: rollback
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v7
+      - id: package
+        env:
+          PACKAGE: ${{ inputs.package }}
+          VERSION: ${{ inputs.version }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          [[ ${VERSION} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::invalid SemVer"; exit 1; }
+          [[ ${CONFIRM} == "ROLLBACK ${PACKAGE} TO ${VERSION}" ]] || { echo "::error::confirmation does not match"; exit 1; }
+          metadata="$(python3 ci/release.py packages | jq -c --arg id "${PACKAGE}" '.[] | select(.id == $id)')"
+          [[ -n ${metadata} ]] || { echo "::error::unknown package ${PACKAGE}"; exit 1; }
+          echo "platforms=$(jq -r .platforms <<<"${metadata}")" >> "$GITHUB_OUTPUT"
+      - id: owner
+        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: repoint latest to the verified version
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          OWNER: ${{ steps.owner.outputs.name }}
+          PACKAGE: ${{ inputs.package }}
+          VERSION: ${{ inputs.version }}
+          PLATFORMS: ${{ steps.package.outputs.platforms }}
+          GH_USER: ${{ github.actor }}
+          GH_PASS: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${PACKAGE}/v${VERSION}"
+          release="$(gh release view "${tag}" --json body,isDraft)"
+          [[ $(jq -r .isDraft <<<"${release}") == false ]] || {
+            echo "::error::${tag} is not a published release"; exit 1;
+          }
+          # shellcheck disable=SC2016
+          recorded="$(jq -r .body <<<"${release}" | sed -nE 's/^- Digest: `(sha256:[0-9a-f]{64})`$/\1/p' | head -1)"
+          [[ ${recorded} == sha256:* ]] || {
+            echo "::error::${tag} has no recorded release digest"; exit 1;
+          }
+          source="ghcr.io/${OWNER}/${PACKAGE}:${VERSION}"
+          target="ghcr.io/${OWNER}/${PACKAGE}:latest"
+          inspection="$(docker buildx imagetools inspect "${source}")"
+          digest="$(awk '$1 == "Digest:" {print $2; exit}' <<<"${inspection}")"
+          [[ ${digest} == sha256:* ]] || { echo "::error::release digest not found"; exit 1; }
+          [[ ${digest} == "${recorded}" ]] || {
+            echo "::error::${source} is ${digest}, but ${tag} records ${recorded}"; exit 1;
+          }
+          options=()
+          [[ ${PLATFORMS} == *,* ]] || options+=(--prefer-index=false)
+          docker buildx imagetools create "${options[@]}" --tag "${target}" "${source}@${digest}"
+          ci/verify-published-mod.sh "${target}"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+      - name: record rollback in the release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PACKAGE: ${{ inputs.package }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          tag="${PACKAGE}/v${VERSION}"
+          body="$(gh release view "${tag}" --json body --jq .body)"
+          note="Emergency rollback: latest was repointed to this verified release by run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+          temporary="$(mktemp)"
+          trap 'rm -f "${temporary}"' EXIT
+          printf '%s\n\n> %s\n' "${body}" "${note}" >"${temporary}"
+          gh release edit "${tag}" --notes-file "${temporary}"

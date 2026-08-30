@@ -1,17 +1,18 @@
 # Gluetun port forward - Docker mod for qbittorrent
 
+[Release history](CHANGELOG.md)
+
 This mod keeps qBittorrent's listening port in sync with the port your VPN
 provider forwards through [gluetun](https://github.com/qdm12/gluetun).
 
 In qbittorrent docker arguments, set an environment variable
-`DOCKER_MODS=ghcr.io/quwisky/qbittorrent-gluetun-portforward-mod:latest`
+`DOCKER_MODS=ghcr.io/quwisky/qbittorrent-gluetun-portforward-mod:1`
 
 If adding multiple mods, enter them in an array separated by `|`, such as
-`DOCKER_MODS=ghcr.io/quwisky/qbittorrent-gluetun-portforward-mod:latest|linuxserver/mods:universal-cron`
+`DOCKER_MODS=ghcr.io/quwisky/qbittorrent-gluetun-portforward-mod:1|linuxserver/mods:universal-cron`
 
-Nightly builds from `develop` are published as
-`ghcr.io/quwisky/qbittorrent-gluetun-portforward-mod:nightly`. A container only
-re-applies a mod when it is recreated, not restarted, so use
+Use `:edge` only to test verified, unreleased work from `master`. A container
+only re-applies a mod when it is recreated, not restarted, so use
 `docker compose up -d --force-recreate qbittorrent` to pick one up.
 
 ---
@@ -137,7 +138,7 @@ services:
       - PGID=1000
       - TZ=Europe/Amsterdam
       - WEBUI_PORT=8080
-      - DOCKER_MODS=ghcr.io/quwisky/qbittorrent-gluetun-portforward-mod:latest
+      - DOCKER_MODS=ghcr.io/quwisky/qbittorrent-gluetun-portforward-mod:1
       # Only if you chose credentials over the localhost bypass:
       # - GLUETUN_PF_QBT_USERNAME=admin
       # - GLUETUN_PF_QBT_PASSWORD=<your permanent WebUI password>
@@ -429,13 +430,13 @@ is exactly why this failure goes unnoticed.
 
 Published tags:
 
-| Tag | From | Notes |
-| --- | --- | --- |
-| `:latest` | `master` | What you want. |
-| `:<commit-sha>` | `master` | Immutable pin of the above. |
-| `:nightly` | `develop` | Changes before they reach `:latest`. |
-| `:nightly-<tree-sha>` | `develop` | Immutable nightly pin. |
-| `:<your-tag>` | any branch | A manual run with the **tag** field filled in. Publishes that tag alone. |
+| Tag | Notes |
+| --- | --- |
+| `:1` | Recommended compatible-release channel. |
+| `:1.2.3` | Exact immutable release. |
+| `:latest` | Newest release, including future breaking majors. |
+| `:edge` | Verified, unreleased `master`; testing only. |
+| `:test-<commit>` | Short-lived, maintainer-approved feature image. |
 
 ## Local development
 

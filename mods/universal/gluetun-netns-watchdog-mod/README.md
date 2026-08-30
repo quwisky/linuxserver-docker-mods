@@ -1,5 +1,7 @@
 # Gluetun network-namespace watchdog - universal Docker mod
 
+[Release history](CHANGELOG.md)
+
 This mod recovers any LinuxServer container that is stranded when the Gluetun
 container whose network stack it shares restarts.
 
@@ -7,19 +9,18 @@ Add it to the LinuxServer application container, not to Gluetun:
 
 ```yaml
 environment:
-  - DOCKER_MODS=ghcr.io/quwisky/universal-gluetun-netns-watchdog-mod:latest
+  - DOCKER_MODS=ghcr.io/quwisky/universal-gluetun-netns-watchdog-mod:1
 ```
 
 Multiple mods are separated with `|`:
 
 ```yaml
 environment:
-  - DOCKER_MODS=ghcr.io/quwisky/universal-gluetun-netns-watchdog-mod:latest|linuxserver/mods:universal-apprise
+  - DOCKER_MODS=ghcr.io/quwisky/universal-gluetun-netns-watchdog-mod:1|linuxserver/mods:universal-apprise
 ```
 
-Nightly builds from `develop` are published as
-`ghcr.io/quwisky/universal-gluetun-netns-watchdog-mod:nightly`. A container only
-applies a new mod layer when it is recreated, not restarted, so use
+Use `:edge` only to test verified, unreleased work from `master`. A container
+only applies a new mod layer when it is recreated, not restarted, so use
 `docker compose up -d --force-recreate <service>` to pick up an update.
 
 > Do not add this standalone mod to Plex or qBittorrent when using this
@@ -112,7 +113,7 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=Europe/Budapest
-      - DOCKER_MODS=ghcr.io/quwisky/universal-gluetun-netns-watchdog-mod:latest
+      - DOCKER_MODS=ghcr.io/quwisky/universal-gluetun-netns-watchdog-mod:1
     volumes:
       - ./sonarr:/config
       - ./media:/data

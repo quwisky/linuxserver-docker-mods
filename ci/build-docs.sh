@@ -73,6 +73,11 @@ for d in "${MODS_DIR}"/*/*/; do
     }
     mkdir -p "${OUT}/mods/${app}"
     cp "${d}README.md" "${OUT}/mods/${app}/${mod}.md"
+    [[ -f "${d}CHANGELOG.md" ]] || {
+        echo "::error::${d} has no package CHANGELOG.md to publish" >&2
+        exit 1
+    }
+    cp "${d}CHANGELOG.md" "${OUT}/mods/${app}/${mod}-changelog.md"
     count=$((count + 1))
 done
 
@@ -101,9 +106,15 @@ sed -i.bak -E 's#\]\((\.\./)*((ci|template)/[^)]*)\)#]('"${BLOB}"'/\2)#g' \
 sed -i.bak -E 's#\]\(\.\./\.\./([a-z0-9-]+)/([a-z0-9-]+)/\)#](../\1/\2.md)#g' \
     "${OUT}"/mods/*/*.md
 
-# Links to CHANGELOG.md resolve to the lower-cased page name on the site.
+# Root links to CHANGELOG.md resolve to the repository-wide page.
 sed -i.bak -E 's@\]\(CHANGELOG\.md(#[^)]*)?\)@](changelog.md\1)@g' "${OUT}/index.md"
-sed -i.bak -E 's@\]\((\.\./)*CHANGELOG\.md(#[^)]*)?\)@](../../changelog.md\2)@g' "${OUT}"/mods/*/*.md
+
+# A mod README's sibling CHANGELOG.md becomes a sibling generated page.
+for page in "${OUT}"/mods/*/*.md; do
+    [[ ${page} == *-changelog.md ]] && continue
+    mod="$(basename "${page}" .md)"
+    sed -i.bak -E 's@\]\(CHANGELOG\.md(#[^)]*)?\)@]('"${mod}"'-changelog.md\1)@g' "${page}"
+done
 
 # CHANGELOG.md links to README.md by name, which is index.md on the site.
 if [[ -f "${OUT}/changelog.md" ]]; then

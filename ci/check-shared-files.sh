@@ -10,13 +10,7 @@
 #  1. A mod copies a shared/ directory that does not exist. The build fails
 #     loudly, so this is only checked for completeness.
 #
-#  2. A mod copies shared/X but its workflow has no paths filter for it. Per-mod
-#     workflows are gated on their own directory, so editing shared/X alone would
-#     change that mod's image WITHOUT running its tests or its build. This is the
-#     serious one, and it is the same class of failure as a mod having no
-#     workflow at all -- silent, and permanent until someone notices.
-#
-#  3. A shared/ directory nothing references. Harmless, but it is dead weight
+#  2. A shared/ directory nothing references. Harmless, but it is dead weight
 #     that will rot, and it usually means a mod was deleted or renamed.
 #
 # It also keeps the older rule that two mods must not ship DIFFERENT content at
@@ -24,18 +18,18 @@
 # in order, so whichever is listed last silently wins and the other mod is
 # subtly broken with nothing in the log to say so.
 #
-# This runs from repo.yml, which has no paths filter, so it fires on every push.
+# This runs below the aggregate CI gate on every pull request and master push.
 # Everything here is derived from the tree and the Dockerfiles rather than from a
 # list kept somewhere, so it cannot drift from what the builds actually do.
 #
-# MODS_DIR and WF_DIR can point elsewhere for testing.
+# MODS_DIR can point elsewhere for testing. Affected-package fan-out is derived
+# by ci/release.py from the same Dockerfile COPY statements.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO}"
 
 MODS_DIR="${MODS_DIR:-mods}"
-WF_DIR="${WF_DIR:-.github/workflows}"
 SHARED_DIR="${SHARED_DIR:-shared}"
 rc=0
 
@@ -49,9 +43,6 @@ for d in "${MODS_DIR}"/*/*/; do
     [[ -f "${d}Dockerfile" ]] || continue
     mod="$(basename "${d%/}")"
     app="$(basename "$(dirname "${d%/}")")"
-    id="${app}-${mod}"
-    wf="${WF_DIR}/mod-${id}.yml"
-
     while IFS= read -r dep; do
         [[ -z ${dep} ]] && continue
         used+=("${dep}")
@@ -62,15 +53,6 @@ for d in "${MODS_DIR}"/*/*/; do
             continue
         fi
 
-        # THE important one. Without this filter, editing the shared code changes
-        # this mod's image and nothing tests or rebuilds it.
-        if [[ -f ${wf} ]] && ! grep -qF "'${dep}/**'" "${wf}"; then
-            err "${wf} has no paths filter for '${dep}/**', but ${d}Dockerfile copies it."
-            echo "       a change to ${dep} would alter ${id}'s image without running its CI."
-            echo "       add this next to the mods/${app}/${mod}/** entry, under BOTH push and pull_request:"
-            echo "         - '${dep}/**'"
-            rc=1
-        fi
     done < <(ci/mod-inputs.sh "${MODS_DIR}/${app}/${mod}" | grep -v "^${MODS_DIR}/")
 done
 

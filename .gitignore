@@ -3,3 +3,5 @@
 /test/.out/
 /docs/
 /site/
+__pycache__/
+*.pyc

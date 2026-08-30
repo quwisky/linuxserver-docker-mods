@@ -1,18 +1,19 @@
 # AMD VAAPI - Docker mod for plex
 
+[Release history](CHANGELOG.md)
+
 This mod makes VAAPI hardware transcoding work on AMD GPUs that Plex's own
 bundled libraries are too old to recognise, by shipping a current Mesa and libva
 and making Plex load them.
 
 In plex docker arguments, set an environment variable
-`DOCKER_MODS=ghcr.io/quwisky/plex-vaapi-amdgpu-mod:latest`
+`DOCKER_MODS=ghcr.io/quwisky/plex-vaapi-amdgpu-mod:1`
 
 If adding multiple mods, enter them in an array separated by `|`, such as
-`DOCKER_MODS=ghcr.io/quwisky/plex-vaapi-amdgpu-mod:latest|linuxserver/mods:plex-absolute-hama`
+`DOCKER_MODS=ghcr.io/quwisky/plex-vaapi-amdgpu-mod:1|linuxserver/mods:plex-absolute-hama`
 
-Nightly builds from `develop` are published as
-`ghcr.io/quwisky/plex-vaapi-amdgpu-mod:nightly`. A container only re-applies a
-mod when it is recreated, not restarted, so use
+Use `:edge` only to test verified, unreleased work from `master`. A container
+only re-applies a mod when it is recreated, not restarted, so use
 `docker compose up -d --force-recreate plex` to pick one up.
 
 > **Fork of
@@ -125,7 +126,7 @@ services:
       - PGID=1000
       - TZ=Europe/Amsterdam
       - VERSION=docker
-      - DOCKER_MODS=ghcr.io/quwisky/plex-vaapi-amdgpu-mod:latest
+      - DOCKER_MODS=ghcr.io/quwisky/plex-vaapi-amdgpu-mod:1
     volumes:
       - ./plex/config:/config
       - /path/to/media:/media
@@ -277,17 +278,21 @@ docker compose up -d --force-recreate plex
    repo's Packages page. GHCR packages are private by default, and
    `/docker-mods` then gets a 401 pulling the manifest. This is the single most
    common "my mod doesn't load" cause.
-4. Point `DOCKER_MODS` at `ghcr.io/<your-user>/plex-vaapi-amdgpu-mod:latest`.
+4. Point `DOCKER_MODS` at `ghcr.io/<your-user>/plex-vaapi-amdgpu-mod:1`.
 
 Published tags:
 
-| Tag | From | Notes |
-| --- | --- | --- |
-| `:latest` | `master` | What you want. Also rebuilt monthly for fresh Mesa. |
-| `:<commit-sha>-<YYYYMMDD>-<run-id>` | `master` | Immutable. Pin this to hold a known-good Mesa snapshot. |
-| `:nightly` | `develop` | Changes before they reach `:latest`. |
-| `:nightly-<tree-sha>-<YYYYMMDD>-<run-id>` | `develop` | Immutable nightly pin. |
-| `:<your-tag>` | any branch | A manual run with the **tag** field filled in. Publishes that tag alone, leaving `:latest` and `:nightly` untouched. |
+| Tag | Notes |
+| --- | --- |
+| `:1` | Recommended compatible-release channel. |
+| `:1.2.3` | Exact immutable audited library snapshot. |
+| `:latest` | Newest release, including future breaking majors. |
+| `:edge` | Verified, unreleased `master`; testing only. |
+| `:test-<commit>` | Short-lived, maintainer-approved feature image. |
+
+A weekly artifact probe compares the actual shipped VAAPI files. It proposes a
+patch release only when those bytes, modes, or symlink targets change; an
+Alpine base digest update by itself is not a release.
 
 The run id is what keeps those immutable. This mod opts out of the
 content-addressed dedupe — its image comes from `alpine:edge`, so an unchanged

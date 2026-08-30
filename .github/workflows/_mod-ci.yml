@@ -1,564 +1,118 @@
 name: Mod CI
 
-# Reusable: every mod's own workflow calls this with its app and mod names.
-# Not triggered directly -- see .github/workflows/mod-<name>.yml, which carries
-# the `paths:` filter that makes a mod's CI run only when that mod changes, and
-# the `schedule:` that produces its nightly build.
-#
-# Keeping the logic here means adding a mod costs one generated caller file
-# rather than a copy of all of this.
-#
-# A mod lives at mods/<app>/<mod>, and is published as its own GHCR package
-# named <app>-<mod>, with ordinary tags:
-#   release  (master)   ghcr.io/<owner>/<app>-<mod>:latest
-#                       ghcr.io/<owner>/<app>-<mod>:<commit-sha>
-#   nightly  (develop)  ghcr.io/<owner>/<app>-<mod>:nightly
-#                       ghcr.io/<owner>/<app>-<mod>:nightly-<tree-sha>
-#   custom   (manual)   ghcr.io/<owner>/<app>-<mod>:<tag>
-#
-# A custom tag is published on its own: it never also moves :latest or :nightly,
-# so a manual build of a feature branch cannot displace a channel.
-#
-# app and mod are separate inputs rather than one composite id because the id
-# cannot be split back apart: LinuxServer image names contain dashes of their
-# own (code-server), so <app>-<mod> is ambiguous in the other direction.
-#
-# A package per mod gives each its own versions list, its own package page and
-# its own visibility setting -- at the cost of having to make each new one
-# public once, see below.
-#
-# The nightly pin is a combined content hash of `mods/<app>/<mod>` and every
-# shared/ directory its Dockerfile copies rather than a date or commit sha. A
-# night where no image input changed resolves to a tag that already exists, and
-# the publish is skipped instead of churning the registry. Tests still run.
-
+# Read-only reusable validation. Publication lives in _mod-publish.yml so pull
+# request code can never inherit a package-write or attestation token.
 on:
   workflow_call:
     inputs:
       app:
-        description: 'Application directory under mods/, i.e. the image the mod is for'
         required: true
         type: string
       mod:
-        description: 'Mod directory under mods/<app>/'
         required: true
         type: string
-      ref:
-        description: 'Git ref to build. Defaults to the ref that triggered the caller.'
-        required: false
-        default: ''
-        type: string
-      channel:
-        description: 'release (publishes :latest) or nightly (publishes :nightly)'
-        required: false
-        default: 'release'
-        type: string
-      publish:
-        description: 'Push the built layer to GHCR'
-        required: false
-        default: false
-        type: boolean
       platforms:
-        description: 'Platforms to build. Narrow it for mods that ship arch-specific binaries.'
         required: false
-        default: 'linux/amd64,linux/arm64'
+        default: linux/amd64,linux/arm64
         type: string
-      tag:
-        description: >-
-          Publish under this exact tag instead of the channel tags. For manual
-          runs: it lets any branch be published for testing without touching
-          :latest or :nightly. Blank means the normal channel tags.
+      source-ref:
         required: false
         default: ''
         type: string
-      dedupe:
-        description: >-
-          Skip the nightly publish when the mod directory is unchanged. Set false
-          for a mod whose image content comes from outside git (a base image it
-          pulls at build time), where an unchanged tree does NOT mean an
-          unchanged image.
-        required: false
-        default: true
-        type: boolean
+
+permissions:
+  contents: read
 
 jobs:
-  # Resolves what to build and whether it is even possible, so a missing
-  # `develop` branch produces one explanatory notice rather than a red X every
-  # night until someone creates it.
-  resolve:
-    name: resolve
-    runs-on: ubuntu-latest
-    outputs:
-      ref: ${{ steps.r.outputs.ref }}
-      buildable: ${{ steps.r.outputs.buildable }}
-    steps:
-      - id: r
-        env:
-          GH_TOKEN: ${{ github.token }}
-          WANT: ${{ inputs.ref }}
-          FALLBACK: ${{ github.ref }}
-          CHANNEL: ${{ inputs.channel }}
-          TAG: ${{ inputs.tag }}
-        run: |
-          ref="${WANT:-${FALLBACK}}"
-          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-          echo "channel: ${CHANNEL}"
-          echo "ref: ${ref}"
-
-          case "${CHANNEL}" in
-            release | nightly) ;;
-            *) echo "::error::unknown channel '${CHANNEL}'; expected release or nightly"; exit 1 ;;
-          esac
-
-          # Validate here rather than at push time, so a typo fails in seconds
-          # instead of after the whole test job has run.
-          if [[ -n ${TAG} ]]; then
-            if [[ ! ${TAG} =~ ^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$ ]]; then
-              echo "::error::'${TAG}' is not a valid OCI tag. Allowed: alphanumerics, dot, dash, underscore; must not start with a dot or dash; 128 characters max."
-              exit 1
-            fi
-            case "${TAG}" in
-              latest | nightly)
-                echo "::error::refusing to publish '${TAG}' as a custom tag: it is a channel tag, and hand-publishing one from an arbitrary ref is how :latest gets silently replaced."
-                echo "::error::to publish a channel, dispatch from master (:latest) or develop (:nightly) and leave the tag field blank."
-                exit 1
-                ;;
-            esac
-            echo "custom tag: ${TAG}"
-          fi
-
-          # Only a ref the caller asked for *instead of* the triggering one can
-          # be absent -- the triggering ref obviously exists, and checking it
-          # would just be a wasted API call.
-          if [[ -n ${WANT} && ${WANT} != "${FALLBACK}" && ${WANT} == refs/heads/* ]]; then
-            branch="${WANT#refs/heads/}"
-            if ! gh api "repos/${GITHUB_REPOSITORY}/branches/${branch}" >/dev/null 2>&1; then
-              echo "::notice title=No ${branch} branch::Branch '${branch}' does not exist, so there is nothing to build. Create it to enable these builds."
-              echo "buildable=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
-          echo "buildable=true" >> "$GITHUB_OUTPUT"
-
   test:
-    name: test
-    needs: resolve
-    if: needs.resolve.outputs.buildable == 'true'
+    name: ${{ inputs.app }}-${{ inputs.mod }} / test
     runs-on: ubuntu-latest
     env:
-      # DIR and ID are the only two forms any step needs. Deliberately no APP or
-      # MOD: they were unused, and `MOD` would mean the bare mod name here while
-      # meaning the composite id in ci/new-mod.sh.
       DIR: mods/${{ inputs.app }}/${{ inputs.mod }}
       ID: ${{ inputs.app }}-${{ inputs.mod }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.resolve.outputs.ref }}
+          ref: ${{ inputs.source-ref || github.sha }}
 
       - name: mod directory exists and is shaped like a mod
         run: |
-          d="${DIR}"
           rc=0
-          [[ -d ${d} ]] || { echo "::error::${d} does not exist on this ref"; exit 1; }
-          [[ -f "${d}/Dockerfile" ]] || { echo "::error::${ID}: no Dockerfile"; rc=1; }
-          [[ -f "${d}/README.md" ]] || { echo "::error::${ID}: no README.md"; rc=1; }
-          [[ -d "${d}/root/etc/s6-overlay/s6-rc.d" ]] || { echo "::error::${ID}: no root/etc/s6-overlay/s6-rc.d"; rc=1; }
-          exit $rc
+          [[ -f "${DIR}/Dockerfile" ]] || { echo "::error::${ID}: no Dockerfile"; rc=1; }
+          [[ -f "${DIR}/README.md" ]] || { echo "::error::${ID}: no README.md"; rc=1; }
+          [[ -f "${DIR}/VERSION" ]] || { echo "::error::${ID}: no VERSION"; rc=1; }
+          [[ -f "${DIR}/CHANGELOG.md" ]] || { echo "::error::${ID}: no CHANGELOG.md"; rc=1; }
+          [[ -d "${DIR}/root/etc/s6-overlay/s6-rc.d" ]] || { echo "::error::${ID}: no s6-rc.d"; rc=1; }
+          exit "${rc}"
 
       - name: s6 scripts must be executable
-        # s6 does not error on a non-executable run script, it just never starts
-        # the service. This is the most common silent failure in a mod.
         run: |
-          bad=$(find "${DIR}" \
-            \( -name run -o -name finish -o -name check \) \
-            -not -perm -u=x,g=x,o=x -print)
-          if [[ -n "${bad}" ]]; then
-            while IFS= read -r f; do
-              echo "::error file=${f},line=1,title=Missing Executable Bit::This file needs to be set as executable!"
-            done <<< "${bad}"
-            exit 1
-          fi
-          echo "**** All perms look good ****"
+          bad="$(find "${DIR}" \( -name run -o -name finish -o -name check \) -not -perm -u=x,g=x,o=x -print)"
+          [[ -z ${bad} ]] || { printf '::error::non-executable s6 files:\n%s\n' "${bad}"; exit 1; }
 
-      - name: every service must have a type and be registered in a user bundle
-        # A service directory with no `type`, or one absent from
-        # user/contents.d, is likewise ignored by s6 without any error.
+      - name: every service must have a type and user registration
         run: |
-          d="${DIR}/root/etc/s6-overlay/s6-rc.d"
+          directory="${DIR}/root/etc/s6-overlay/s6-rc.d"
           rc=0
-          for svc in "${d}"/*/; do
-            s="$(basename "${svc%/}")"
-            case "${s}" in user | user2 | init-mods* | legacy-services) continue ;; esac
-            [[ -f "${svc}type" ]] || { echo "::error::${s} has no 'type' file"; rc=1; }
-            if ! ls "${d}"/user*/contents.d/"${s}" >/dev/null 2>&1; then
-              echo "::error::${s} is not registered in user/contents.d -- s6 will silently ignore it"
-              rc=1
-            fi
+          for service in "${directory}"/*/; do
+            name="$(basename "${service%/}")"
+            case "${name}" in user | user2 | init-mods* | legacy-services) continue ;; esac
+            [[ -f "${service}type" ]] || { echo "::error::${name} has no type"; rc=1; }
+            ls "${directory}"/user*/contents.d/"${name}" >/dev/null 2>&1 || {
+              echo "::error::${name} is not registered in user/contents.d"; rc=1;
+            }
           done
-          exit $rc
+          exit "${rc}"
 
-      - name: s6 files must be plain UTF-8 with LF and no BOM
-        # A stray CR makes the kernel try to exec `/usr/bin/with-contenv\r` and
-        # report "no such file or directory" for a file that plainly exists.
+      - name: s6 files must be UTF-8 with LF and no BOM
         run: |
           rc=0
-          if crlf=$(grep -rlU $'\r' "${DIR}/root/"); then
-            echo "::error::CRLF line endings found:"; echo "${crlf}"; rc=1
+          if crlf="$(grep -rlU $'\r' "${DIR}/root/" || true)" && [[ -n ${crlf} ]]; then
+            printf '::error::CRLF files:\n%s\n' "${crlf}"; rc=1
           fi
-          if bom=$(LC_ALL=C grep -rl $'\xEF\xBB\xBF' "${DIR}/root/"); then
-            echo "::error::UTF-8 BOM found:"; echo "${bom}"; rc=1
+          if bom="$(LC_ALL=C grep -rl $'\xEF\xBB\xBF' "${DIR}/root/" || true)" && [[ -n ${bom} ]]; then
+            printf '::error::BOM files:\n%s\n' "${bom}"; rc=1
           fi
-          exit $rc
+          exit "${rc}"
 
       - name: shellcheck
         run: |
-          shellcheck --version
-          mapfile -t files < <(find "${DIR}" -type f \
-            \( -name run -o -name finish -o -name check -o -name '*.sh' \) | sort)
-          if ((${#files[@]} == 0)); then
-            echo "no shell scripts in ${ID}, nothing to check"
-            exit 0
-          fi
-          printf '  %s\n' "${files[@]}"
-          # -x so a test harness that sources the mod's ./run can be followed.
-          shellcheck -x "${files[@]}"
+          mapfile -t files < <(find "${DIR}" -type f \( -name run -o -name finish -o -name check -o -name '*.sh' \) | sort)
+          ((${#files[@]} == 0)) || shellcheck -x "${files[@]}"
 
       - name: unit tests
         run: |
-          t="${DIR}/test/run_tests.sh"
-          if [[ ! -f ${t} ]]; then echo "no unit tests for ${ID}"; exit 0; fi
-          bash "${t}"
-          # Second pass with jq masked, exercising any pure-shell fallback.
-          NO_JQ=1 bash "${t}"
+          test_file="${DIR}/test/run_tests.sh"
+          [[ -f ${test_file} ]] || exit 0
+          bash "${test_file}"
+          NO_JQ=1 bash "${test_file}"
 
-      - name: validate stub configs
+      - name: validate Caddy stubs
         run: |
-          d="${DIR}/test/stubs"
-          if [[ ! -d ${d} ]] || ! ls "${d}"/Caddyfile.* >/dev/null 2>&1; then
-            echo "no Caddy stubs for ${ID}"; exit 0
-          fi
-          docker run --rm -v "$PWD/${d}:/s:ro" -w /s --entrypoint sh caddy:2-alpine -c '
+          directory="${DIR}/test/stubs"
+          if [[ ! -d ${directory} ]] || ! compgen -G "${directory}/Caddyfile.*" >/dev/null; then exit 0; fi
+          docker run --rm -v "$PWD/${directory}:/s:ro" -w /s --entrypoint sh caddy:2-alpine -c '
             rc=0
-            for f in Caddyfile.*; do
-              if caddy validate --adapter caddyfile --config "$f" >/dev/null 2>&1; then
-                echo "OK   $f"
-              else
-                echo "BAD  $f"
-                caddy validate --adapter caddyfile --config "$f" 2>&1 | tail -5
-                rc=1
-              fi
-            done
+            for file in Caddyfile.*; do caddy validate --adapter caddyfile --config "$file" || rc=1; done
             exit $rc'
 
       - name: end-to-end smoke test
-        # Worth running nightly even when the mod itself has not changed: it
-        # pulls the images the harness depends on, so upstream breakage surfaces
-        # here rather than in someone's container.
         run: |
-          s="${DIR}/test/smoke.sh"
-          if [[ ! -f ${s} ]]; then echo "no smoke test for ${ID}"; exit 0; fi
-          bash "${s}"
+          smoke="${DIR}/test/smoke.sh"
+          [[ -f ${smoke} ]] || exit 0
+          bash "${smoke}"
 
       - uses: docker/setup-buildx-action@v4
 
-      - name: the layer must build, and must be exactly one layer
+      - name: build and verify the local layer
         env:
           PLATFORMS: ${{ inputs.platforms }}
         run: |
-          # Build the first declared platform: --load cannot take a multi-arch
-          # result, and building an arch the mod does not support would be a
-          # meaningless check.
-          #
-          # The context is the repo root, not the mod directory, so a Dockerfile
-          # can reach shared/ as well as its own root/. Everything a mod ships is
-          # still named explicitly by its COPY lines.
           docker buildx build --load --provenance=false \
-            --platform "${PLATFORMS%%,*}" \
-            -f "${DIR}/Dockerfile" \
-            -t "local/${ID}:test" .
-          layers=$(docker image inspect "local/${ID}:test" --format '{{len .RootFS.Layers}}')
-          size=$(docker image inspect "local/${ID}:test" --format '{{.Size}}')
-          echo "${ID}: ${layers} layer(s), ${size} bytes"
-          # /docker-mods only ever pulls .layers[0] of the manifest, so anything
-          # in a second layer is silently dropped at runtime.
-          if [[ ${layers} != 1 ]]; then
-            echo "::error::${ID} produced ${layers} layers; a mod must be exactly one"
-            exit 1
-          fi
-
-      - name: and must contain only the overlay
-        run: |
+            --platform "${PLATFORMS%%,*}" -f "${DIR}/Dockerfile" -t "local/${ID}:test" .
+          layers="$(docker image inspect "local/${ID}:test" --format '{{len .RootFS.Layers}}')"
+          [[ ${layers} == 1 ]] || { echo "::error::${ID} produced ${layers} layers"; exit 1; }
           docker create --name probe "local/${ID}:test" /nonexistent >/dev/null
+          trap 'docker rm -f probe >/dev/null 2>&1 || true' EXIT
           docker export probe | tar -tf - \
-            | grep -vE '^(dev|proc|sys)/|^\.dockerenv$|^etc/(hostname|hosts|mtab|resolv.conf)$|/$' \
-            | sort
-          docker rm probe >/dev/null
-
-  publish:
-    # Static on purpose. GitHub does not evaluate the `inputs` context in a
-    # reusable workflow's job name, so `publish ${{ inputs.channel }}` renders
-    # as that literal string in the Actions UI. The channel is reported in the
-    # first step and in the job summary instead.
-    name: publish
-    needs: [resolve, test]
-    if: inputs.publish && needs.resolve.outputs.buildable == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    env:
-      DIR: mods/${{ inputs.app }}/${{ inputs.mod }}
-      ID: ${{ inputs.app }}-${{ inputs.mod }}
-      CHANNEL: ${{ inputs.channel }}
-      DEDUPE: ${{ inputs.dedupe }}
-      TAG: ${{ inputs.tag }}
-    steps:
-      # First step rather than buried, since the job name cannot carry it.
-      - name: what is being published
-        run: |
-          echo "mod: ${ID}"
-          echo "ref: ${REF}"
-          if [[ -n ${TAG} ]]; then
-            echo "tag: ${TAG}  (custom -- channel tags are left alone)"
-            echo "::notice title=Publishing ${ID}::custom tag '${TAG}' from ${REF}"
-          else
-            echo "channel: ${CHANNEL}"
-            echo "::notice title=Publishing ${ID}::channel ${CHANNEL} from ${REF}"
-          fi
-        env:
-          REF: ${{ needs.resolve.outputs.ref }}
-
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.resolve.outputs.ref }}
-
-      - name: Lowercase the owner
-        id: owner
-        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
-
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: work out the tags
-        id: tags
-        env:
-          OWNER: ${{ steps.owner.outputs.name }}
-        run: |
-          # One GHCR package per mod, named <app>-<mod>. GHCR requires the
-          # whole path to be lowercase; app and mod are validated as lowercase
-          # by ci/new-mod.sh and OWNER was lowercased above.
-          pkg="ghcr.io/${OWNER}/${ID}"
-
-          if [[ -n ${TAG} ]]; then
-            # A custom tag publishes that tag and nothing else. It must not also
-            # move :latest or :nightly -- the point is to get an image out of an
-            # arbitrary branch without disturbing a channel.
-            moving="${pkg}:${TAG}"
-            pinned=""
-          else
-            # With dedupe off, the same git content can legitimately produce a
-            # different image (a rebuild pulls a newer base), so a pin derived
-            # only from git would be overwritten and stop being a pin.
-            #
-            # The run id, not just the date. A date was enough while the only
-            # dedupe-off publish was one cron a night; now that any push to a
-            # channel branch publishes, two rebuilds of the same tree on the same
-            # day are ordinary -- a change to _mod-ci.yml does it, since that
-            # file is in every caller's paths filter -- and they would collide on
-            # one tag, silently overwriting the pin they promise not to.
-            stamp=""
-            if [[ ${DEDUPE} != "true" ]]; then
-                stamp="-$(date -u +%Y%m%d)-${GITHUB_RUN_ID}"
-            fi
-
-            if [[ ${CHANNEL} == nightly ]]; then
-              # Content-addressed over everything the image is built FROM: this
-              # mod's directory plus any shared/ directory its Dockerfile copies.
-              # Identical content always yields the same pin, which is what makes
-              # the skip below possible -- and hashing only the mod directory
-              # would make a shared/ change produce a different image under a pin
-              # that already exists, so the publish would be skipped silently.
-              tree="$(ci/mod-inputs.sh --hash "${DIR}")"
-              moving="${pkg}:nightly"
-              pinned="${pkg}:nightly-${tree}${stamp}"
-              echo "mod tree hash: ${tree}"
-            else
-              moving="${pkg}:latest"
-              pinned="${pkg}:${GITHUB_SHA}${stamp}"
-            fi
-          fi
-
-          # build-push-action takes a newline-separated list, so an absent pin is
-          # simply one line rather than a blank tag it would choke on.
-          #
-          # `if` rather than `[[ ]] && echo` throughout: GitHub runs steps with
-          # `bash -e`, and that idiom as the final line of a run block exits 1
-          # when the test is false, failing the step.
-          {
-            echo "tags<<__TAGS__"
-            echo "${moving}"
-            if [[ -n ${pinned} ]]; then echo "${pinned}"; fi
-            echo "__TAGS__"
-            echo "moving=${moving}"
-            echo "pinned=${pinned}"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "  ${moving}"
-          if [[ -n ${pinned} ]]; then echo "  ${pinned}"; fi
-
-      # Only for nightlies: the pin is content-addressed, so an existing pinned
-      # tag means nothing changed since the last one. The moving :<mod>-nightly
-      # tag already points at that same digest, so there is nothing to do.
-      - name: skip if this exact content was already published
-        id: dedupe
-        env:
-          PINNED: ${{ steps.tags.outputs.pinned }}
-        run: |
-          if [[ -z ${TAG} && ${CHANNEL} == nightly && ${DEDUPE} == "true" ]] && docker buildx imagetools inspect "${PINNED}" >/dev/null 2>&1; then
-            echo "::notice title=${ID} unchanged::Already published as ${PINNED}; skipping the push."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: docker/build-push-action@v7
-        if: steps.dedupe.outputs.skip != 'true'
-        with:
-          # Repo root, so a Dockerfile can COPY from shared/ as well as from its
-          # own mods/<app>/<mod>/root/. See ci/mod-inputs.sh for why the nightly
-          # pin has to follow suit.
-          context: .
-          file: ${{ env.DIR }}/Dockerfile
-          platforms: ${{ inputs.platforms }}
-          # provenance would add an attestation manifest; a mod must stay a
-          # single layer because /docker-mods only reads .layers[0].
-          provenance: false
-          # THE MEDIA TYPE IS LOAD-BEARING. /docker-mods fetches the manifest
-          # with exactly two Accept types:
-          #     application/vnd.docker.distribution.manifest.v2+json
-          #     application/vnd.oci.image.index.v1+json
-          # A multi-platform build produces an OCI *index*, which is accepted.
-          # A single-platform build produces a bare OCI *image manifest*, which
-          # is not -- the registry then answers
-          #     404 MANIFEST_UNKNOWN: OCI manifest found, but Accept header
-          #     does not support OCI manifests
-          # and the mod silently falls back to its cache, so on a fresh
-          # container it does not load at all. Single-platform builds therefore
-          # publish Docker media types instead, which that first Accept covers.
-          # Verified against a live registry; see the check below.
-          outputs: type=image,push=true,oci-mediatypes=${{ contains(inputs.platforms, ',') }}
-          # image.source is what links a GHCR package back to this repo, so the
-          # package page shows the README and inherits repo access. Labels are
-          # config metadata, not a layer, so this does not affect the
-          # single-layer requirement.
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.title=${{ env.ID }}
-          tags: ${{ steps.tags.outputs.tags }}
-
-      - name: the published manifest must be readable by /docker-mods
-        # Replays the exact request /docker-mods makes, including its two Accept
-        # headers. Anything other than a 200 with a resolvable layer digest
-        # means the mod will not load, however healthy the build looked.
-        if: steps.dedupe.outputs.skip != 'true'
-        env:
-          MOVING: ${{ steps.tags.outputs.moving }}
-          OWNER: ${{ steps.owner.outputs.name }}
-          GH_USER: ${{ github.actor }}
-          GH_PASS: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          ref="${MOVING#ghcr.io/}"
-          repo="${ref%%:*}"
-          tag="${ref##*:}"
-          token="$(curl -sSf -u "${GH_USER}:${GH_PASS}" \
-            "https://ghcr.io/token?scope=repository:${repo}:pull&service=ghcr.io" | jq -r .token)"
-
-          body="$(curl -sS -w '\n%{http_code}' \
-            --header "Accept: application/vnd.docker.distribution.manifest.v2+json" \
-            --header "Accept: application/vnd.oci.image.index.v1+json" \
-            --header "Authorization: Bearer ${token}" \
-            "https://ghcr.io/v2/${repo}/manifests/${tag}")"
-          code="${body##*$'\n'}"
-          json="${body%$'\n'*}"
-
-          if [[ ${code} != 200 ]]; then
-            echo "::error title=Mod is unreadable::${MOVING} returned HTTP ${code} for the Accept types /docker-mods sends."
-            echo "${json}"
-            echo "This usually means a bare OCI image manifest was published. See the outputs: line above."
-            exit 1
-          fi
-
-          # /docker-mods takes .layers[0] directly, or resolves the index first.
-          if jq -e '.layers // empty' >/dev/null 2>&1 <<<"${json}"; then
-            layers=$(jq -r '.layers | length' <<<"${json}")
-            echo "single manifest, ${layers} layer(s): $(jq -r '.layers[0].digest' <<<"${json}")"
-            if [[ ${layers} != 1 ]]; then
-              echo "::error::${MOVING} has ${layers} layers; /docker-mods only extracts the first"
-              exit 1
-            fi
-          else
-            mapfile -t manifests < <(jq -r \
-              '.manifests[] | select(.platform.architecture != "unknown") | [(.platform.os + "/" + .platform.architecture), .digest] | @tsv' \
-              <<<"${json}")
-            if ((${#manifests[@]} == 0)); then
-              echo "::error::${MOVING} index has no usable architecture entry"
-              exit 1
-            fi
-
-            echo "index, verified entries:"
-            for entry in "${manifests[@]}"; do
-              platform="${entry%%$'\t'*}"
-              digest="${entry#*$'\t'}"
-              child_body="$(curl -sS -w '\n%{http_code}' \
-                --header "Accept: application/vnd.docker.distribution.manifest.v2+json" \
-                --header "Accept: application/vnd.oci.image.manifest.v1+json" \
-                --header "Authorization: Bearer ${token}" \
-                "https://ghcr.io/v2/${repo}/manifests/${digest}")"
-              child_code="${child_body##*$'\n'}"
-              child_json="${child_body%$'\n'*}"
-
-              if [[ ${child_code} != 200 ]]; then
-                echo "::error title=Architecture is unreadable::${MOVING} ${platform} returned HTTP ${child_code}."
-                echo "${child_json}"
-                exit 1
-              fi
-              child_layers="$(jq -r '.layers | length' <<<"${child_json}")"
-              if [[ ${child_layers} != 1 ]]; then
-                echo "::error::${MOVING} ${platform} has ${child_layers} layers; /docker-mods only extracts the first"
-                exit 1
-              fi
-              echo "  ${platform} ${digest}: 1 layer"
-            done
-          fi
-          echo "**** ${MOVING} is readable by /docker-mods ****"
-
-      - name: summary
-        env:
-          MOVING: ${{ steps.tags.outputs.moving }}
-          PINNED: ${{ steps.tags.outputs.pinned }}
-          SKIPPED: ${{ steps.dedupe.outputs.skip }}
-        run: |
-          {
-            echo "### ${ID} (${CHANNEL})"
-            if [[ ${SKIPPED} == true ]]; then
-              echo "Unchanged since the last nightly; nothing pushed."
-              echo ""
-              echo "Still published at \`${PINNED}\`."
-            else
-              echo "Pushed:"
-              echo ""
-              echo "- \`${MOVING}\`"
-              if [[ -n ${PINNED} ]]; then echo "- \`${PINNED}\`"; fi
-            fi
-            echo ""
-            echo "First publish of a mod? Set the \`${ID}\` **package** to public on the repo's Packages page."
-            echo "Each mod is its own package, so this is once per mod, and a private package makes \`/docker-mods\` fail with a 401 pulling the manifest."
-          } >> "$GITHUB_STEP_SUMMARY"
+            | grep -vE '^(dev|proc|sys)/|^\.dockerenv$|^etc/(hostname|hosts|mtab|resolv.conf)$|/$' | sort

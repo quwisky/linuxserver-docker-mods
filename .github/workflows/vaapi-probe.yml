@@ -1,0 +1,192 @@
+name: VAAPI dependency probe
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: read
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: vaapi-dependency-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: Compare shipped VAAPI bytes
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    environment: release
+    env:
+      DIR: mods/plex/vaapi-amdgpu-mod
+      ID: plex-vaapi-amdgpu-mod
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - name: select the released or pending comparison baseline
+        id: baseline
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          branch='deps/vaapi-runtime'
+          comparison="${RUNNER_TEMP}/VAAPI-COMPARISON.json"
+          number="$(gh pr list --state open --head "${branch}" --json number --jq '.[0].number // empty')"
+          if [[ -n ${number} ]]; then
+            git fetch --no-tags origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"
+            git show "refs/remotes/origin/${branch}:${DIR}/VAAPI-FINGERPRINT.json" >"${comparison}" 2>/dev/null || true
+            echo "kind=pending" >> "$GITHUB_OUTPUT"
+          elif [[ -f ${DIR}/VAAPI-FINGERPRINT.json ]]; then
+            cp "${DIR}/VAAPI-FINGERPRINT.json" "${comparison}"
+            echo "kind=released" >> "$GITHUB_OUTPUT"
+          else
+            : >"${comparison}"
+            echo "kind=missing" >> "$GITHUB_OUTPUT"
+          fi
+          echo "file=${comparison}" >> "$GITHUB_OUTPUT"
+      - id: owner
+        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build once and fingerprint the final overlay
+        id: fingerprint
+        env:
+          OWNER: ${{ steps.owner.outputs.name }}
+        run: |
+          docker buildx build --pull --no-cache --load --provenance=false --platform linux/amd64 \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.title=${ID}" \
+            -f "${DIR}/Dockerfile" -t "local/${ID}:probe" .
+          container="$(docker create "local/${ID}:probe" /nonexistent)"
+          scratch="$(mktemp -d)"
+          trap 'docker rm -f "${container}" >/dev/null 2>&1 || true; rm -rf "${scratch}"' EXIT
+          docker export "${container}" | tar -xf - -C "${scratch}"
+          python3 ci/vaapi-fingerprint.py "${scratch}" --output "${RUNNER_TEMP}/VAAPI-FINGERPRINT.json"
+          fingerprint="$(jq -r .fingerprint "${RUNNER_TEMP}/VAAPI-FINGERPRINT.json")"
+          previous="$(jq -r '.fingerprint // empty' "${{ steps.baseline.outputs.file }}" 2>/dev/null || true)"
+          if [[ ${fingerprint} == "${previous}" ]]; then
+            {
+              echo "changed=false"
+              echo "bootstrap=false"
+            } >> "$GITHUB_OUTPUT"
+            echo "No shipped VAAPI byte changed."
+            exit 0
+          fi
+          if [[ -z ${previous} ]]; then
+            {
+              echo "changed=true"
+              echo "bootstrap=true"
+              echo "fingerprint=${fingerprint}"
+            } >> "$GITHUB_OUTPUT"
+            echo 'No released baseline exists; proposing non-releasing audit metadata.'
+            exit 0
+          fi
+          short="${fingerprint#sha256:}"
+          short="${short:0:12}"
+          candidate="ghcr.io/${OWNER}/${ID}:candidate-vaapi-${short}-${GITHUB_RUN_ID}"
+          docker tag "local/${ID}:probe" "${candidate}"
+          docker push "${candidate}"
+          inspection="$(docker buildx imagetools inspect "${candidate}")"
+          digest="$(awk '$1 == "Digest:" {print $2; exit}' <<<"${inspection}")"
+          [[ ${digest} == sha256:* ]] || { echo "::error::candidate digest is missing"; exit 1; }
+          GH_USER="${GITHUB_ACTOR}" GH_PASS="${{ secrets.GITHUB_TOKEN }}" \
+            ci/verify-published-mod.sh "${candidate}@${digest}"
+          {
+            echo "changed=true"
+            echo "bootstrap=false"
+            echo "fingerprint=${fingerprint}"
+            echo "short=${short}"
+            echo "candidate=${candidate}"
+            echo "digest=${digest}"
+          } >> "$GITHUB_OUTPUT"
+      - name: resolve Alpine package audit from the cached source stage
+        if: steps.fingerprint.outputs.changed == 'true'
+        run: |
+          docker buildx build --load --provenance=false --platform linux/amd64 --target source \
+            -f "${DIR}/Dockerfile" -t "local/${ID}:source" .
+          docker run --rm "local/${ID}:source" sh -c 'apk info -v | LC_ALL=C sort' \
+            >"${RUNNER_TEMP}/VAAPI-PACKAGES.txt"
+      - uses: actions/attest-build-provenance@v3
+        if: steps.fingerprint.outputs.changed == 'true' && steps.fingerprint.outputs.bootstrap != 'true'
+        with:
+          subject-name: ghcr.io/${{ steps.owner.outputs.name }}/${{ env.ID }}
+          subject-digest: ${{ steps.fingerprint.outputs.digest }}
+          push-to-registry: true
+      - name: open the reviewed artifact-update pull request
+        if: steps.fingerprint.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          FINGERPRINT: ${{ steps.fingerprint.outputs.fingerprint }}
+          SHORT: ${{ steps.fingerprint.outputs.short }}
+          CANDIDATE: ${{ steps.fingerprint.outputs.candidate }}
+          DIGEST: ${{ steps.fingerprint.outputs.digest }}
+          BOOTSTRAP: ${{ steps.fingerprint.outputs.bootstrap }}
+        run: |
+          branch='deps/vaapi-runtime'
+          git fetch --no-tags origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" 2>/dev/null || true
+          remote_sha="$(git rev-parse --verify "refs/remotes/origin/${branch}" 2>/dev/null || true)"
+          git switch --force-create "${branch}" origin/master
+          cp "${RUNNER_TEMP}/VAAPI-FINGERPRINT.json" "${DIR}/VAAPI-FINGERPRINT.json"
+          cp "${RUNNER_TEMP}/VAAPI-PACKAGES.txt" "${DIR}/VAAPI-PACKAGES.txt"
+          candidate_record="${DIR}/VAAPI-CANDIDATE.json"
+          if [[ ${BOOTSTRAP} == true ]]; then
+            rm -f "${candidate_record}"
+            title='chore(plex-vaapi-amdgpu-mod): establish runtime baseline'
+          else
+            jq -n \
+              --arg fingerprint "${FINGERPRINT}" \
+              --arg ref "${CANDIDATE}" \
+              --arg digest "${DIGEST}" \
+              --arg source_sha "${GITHUB_SHA}" \
+              '{fingerprint: $fingerprint, ref: $ref, digest: $digest, source_sha: $source_sha}' \
+              >"${candidate_record}"
+            title='fix(plex-vaapi-amdgpu-mod): refresh runtime libraries'
+          fi
+          git add -A -- "${DIR}/VAAPI-FINGERPRINT.json" "${DIR}/VAAPI-PACKAGES.txt" "${candidate_record}"
+          git config user.name 'linuxserver-docker-mods-release[bot]'
+          git config user.email 'linuxserver-docker-mods-release[bot]@users.noreply.github.com'
+          git commit -m "${title}"
+          if [[ -n ${remote_sha} ]]; then
+            git push --force-with-lease="refs/heads/${branch}:${remote_sha}" origin "HEAD:${branch}"
+          else
+            git push origin "HEAD:${branch}"
+          fi
+          body="${RUNNER_TEMP}/vaapi-pr.md"
+          {
+            echo '## What'
+            echo
+            if [[ ${BOOTSTRAP} == true ]]; then
+              echo 'Records the first normalized shipped-file fingerprint as audit metadata. This does not authorize a release.'
+            else
+              echo 'Updates the audited VAAPI runtime overlay because its normalized shipped-file fingerprint changed.'
+            fi
+            echo
+            echo "- Fingerprint: \`${FINGERPRINT}\`"
+            if [[ ${BOOTSTRAP} != true ]]; then
+              echo "- Candidate: \`${CANDIDATE}@${DIGEST}\`"
+              echo
+              echo 'The candidate was built once and will be promoted without rebuilding after review.'
+            fi
+          } >"${body}"
+          existing="$(gh pr list --state open --head "${branch}" --json number --jq '.[0].number // empty')"
+          if [[ -n ${existing} ]]; then
+            gh pr edit "${existing}" --title "${title}" --body-file "${body}"
+          else
+            gh pr create --base master --head "${branch}" \
+              --title "${title}" --body-file "${body}"
+          fi

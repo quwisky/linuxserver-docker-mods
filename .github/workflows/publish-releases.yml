@@ -1,0 +1,92 @@
+name: Publish releases
+
+# workflow_run loads this privileged workflow from the default branch only.
+# Release Please has finished creating every exact tag and draft before this
+# workflow discovers and completes the pending package releases.
+on:
+  workflow_run:
+    workflows: [Release Please]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-releases
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Discover pending draft releases
+    if: >-
+      github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.head_branch == 'master'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.drafts.outputs.matrix }}
+      count: ${{ steps.drafts.outputs.count }}
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - id: drafts
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          releases="$(mktemp)"
+          trap 'rm -f "${releases}"' EXIT
+          gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" >"${releases}"
+          matrix="$(python3 ci/release.py release-matrix \
+            --releases "${releases}" --owner "${GITHUB_REPOSITORY_OWNER,,}" | jq -c .)"
+          count="$(jq '.include | length' <<<"${matrix}")"
+          {
+            echo "matrix=${matrix}"
+            echo "count=${count}"
+          } >> "$GITHUB_OUTPUT"
+          jq . <<<"${matrix}"
+
+  publish:
+    name: Publish package release matrix
+    needs: discover
+    if: needs.discover.outputs.count != '0'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/_mod-publish.yml
+    with:
+      app: ${{ matrix.app }}
+      mod: ${{ matrix.mod }}
+      platforms: ${{ matrix.platforms }}
+      source-ref: ${{ matrix.tag }}
+      publish: true
+      moving-tag: edge
+      release-version: ${{ matrix.version }}
+      candidate-ref: ${{ matrix.candidate_ref }}
+      candidate-digest: ${{ matrix.candidate_digest }}
+      deployment-environment: release
+    secrets: inherit
+
+  complete:
+    name: Release / complete
+    needs: [discover, publish]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          DISCOVER: ${{ needs.discover.result }}
+          PUBLISH: ${{ needs.publish.result }}
+        run: |
+          [[ ${DISCOVER} == success ]] || { echo "::error::draft discovery failed"; exit 1; }
+          case "${PUBLISH}" in success | skipped) ;; *) echo "::error::package publication failed"; exit 1 ;; esac

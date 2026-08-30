@@ -1,0 +1,92 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "simple",
+  "bootstrap-sha": "f7a2e6f88d426a7d40dc6291b1b16d51e2cf33cc",
+  "initial-version": "1.0.0",
+  "version-file": "VERSION",
+  "include-component-in-tag": true,
+  "include-v-in-tag": true,
+  "include-v-in-release-name": true,
+  "tag-separator": "/",
+  "separate-pull-requests": false,
+  "draft": true,
+  "force-tag-creation": true,
+  "prerelease": false,
+  "changelog-sections": [
+    {
+      "type": "feat",
+      "section": "Features"
+    },
+    {
+      "type": "fix",
+      "section": "Fixes"
+    },
+    {
+      "type": "chore",
+      "section": "Maintenance",
+      "hidden": true
+    },
+    {
+      "type": "build",
+      "section": "Build",
+      "hidden": true
+    },
+    {
+      "type": "docs",
+      "section": "Documentation",
+      "hidden": true
+    },
+    {
+      "type": "test",
+      "section": "Tests",
+      "hidden": true
+    },
+    {
+      "type": "ci",
+      "section": "Continuous Integration",
+      "hidden": true
+    },
+    {
+      "type": "refactor",
+      "section": "Refactoring",
+      "hidden": true
+    },
+    {
+      "type": "style",
+      "section": "Style",
+      "hidden": true
+    },
+    {
+      "type": "revert",
+      "section": "Reverts",
+      "hidden": true
+    },
+    {
+      "type": "deps",
+      "section": "Dependencies",
+      "hidden": true
+    },
+    {
+      "type": "perf",
+      "section": "Performance",
+      "hidden": true
+    }
+  ],
+  "packages": {
+    "mods/duplicati/discord-notify-mod": {
+      "component": "duplicati-discord-notify-mod"
+    },
+    "mods/plex/gluetun-portforward-mod": {
+      "component": "plex-gluetun-portforward-mod"
+    },
+    "mods/plex/vaapi-amdgpu-mod": {
+      "component": "plex-vaapi-amdgpu-mod"
+    },
+    "mods/qbittorrent/gluetun-portforward-mod": {
+      "component": "qbittorrent-gluetun-portforward-mod"
+    },
+    "mods/universal/gluetun-netns-watchdog-mod": {
+      "component": "universal-gluetun-netns-watchdog-mod"
+    }
+  }
+}
