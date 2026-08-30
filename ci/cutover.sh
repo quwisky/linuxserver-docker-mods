@@ -42,7 +42,11 @@ while IFS=$'\t' read -r package version; do
         printf '%s has not completed its initial release\n' "${package}" >&2
         exit 1
     }
-    gh release view "${package}/v${version}" >/dev/null
+    is_draft="$(gh release view "${package}/v${version}" --json isDraft --jq .isDraft)"
+    [[ ${is_draft} == false ]] || {
+        printf '%s v%s is still a draft release\n' "${package}" "${version}" >&2
+        exit 1
+    }
     printf '  %s v%s\n' "${package}" "${version}"
 
     endpoint="${package_root}/${package}/versions"

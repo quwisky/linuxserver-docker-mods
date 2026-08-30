@@ -110,8 +110,8 @@ ci/                             scaffolding and the repo-wide checks
   edge.yml                      trusted master-only edge publication
   _mod-ci.yml                   reusable read-only package validation
   _mod-publish.yml              trusted candidate publication and promotion
-  release-pr.yml                rolling combined release PR
-  release.yml                   digest promotion and GitHub Releases
+  release-please.yml            combined release PR and draft releases
+  publish-releases.yml          trusted draft completion and image promotion
 ```
 
 ### Sharing code between mods
@@ -140,9 +140,9 @@ Two things follow, both derived from Dockerfile `COPY` statements:
 
 - `ci/release.py affected` expands a shared change to every consuming package,
   so all affected images are tested and `edge` moves only after verification.
-- A change fragment targeting shared code expands its bump to those same
-  consumers. A package-specific override may increase, but never lower, that
-  bump.
+- Every consumer records a generated hash of its shared inputs. CI rejects a
+  shared change until those package-local markers are refreshed, keeping
+  Release Please's package paths aligned with the images that actually change.
 
 **The two directory levels are the single source of truth.** A mod at
 `mods/<app>/<modname>` is published as `ghcr.io/<owner>/<app>-<modname>`. There
@@ -173,8 +173,9 @@ Then:
    `root/etc/s6-overlay/s6-rc.d/user/contents.d/` and from
    `init-mods-end/dependencies.d/` at the same time.
 3. Make sure any `run`/`finish` you keep is executable — see below.
-4. Add a reviewed `.changes/*.json` fragment, then open a pull request. The
-   aggregate workflow discovers and tests the new package automatically.
+4. Open a pull request with a Conventional Commit title. The scaffold registers
+   the new package with Release Please, and the aggregate workflow discovers and
+   tests it automatically. Use `feat(<modname>): ...` for its initial release.
 
 **After a mod's first successful build, set that package's visibility to
 PUBLIC** on the repo's Packages page. GHCR packages are private by default, and
@@ -246,9 +247,9 @@ These are the failure modes that produce no error, just a mod that does nothing:
 `ci.yml` runs for every pull request. It derives one dynamic
 matrix from the changed paths, expands shared inputs to their Dockerfile
 consumers, and reports one stable branch-protection result: `CI / required`.
-Repository contracts, release-fragment validation, strict documentation, and
-every affected mod's unit, smoke, shell, layer, and manifest checks sit below
-that gate.
+Repository contracts, Conventional release-intent validation, shared-marker
+integrity, strict documentation, and every affected mod's unit, smoke, shell,
+layer, and manifest checks sit below that gate.
 
 Pull requests never receive secrets or publication permissions. The separate
 master-push-only `edge.yml` validates each relevant package, builds it once as
@@ -258,13 +259,31 @@ unreleased candidates are retained; candidates backing releases are permanent.
 
 ### Release automation
 
-Runtime changes require a reviewed `.changes/*.json` fragment. A repository
-GitHub App continually updates one `release/next` pull request, independently
-bumps each affected `VERSION`, writes its package changelog, and records the
-authorized plan. Merging that current, green PR builds or reuses each immutable
-candidate, promotes the exact digest to SemVer aliases and `latest`, attaches
-SBOM and provenance attestations, and publishes one package-scoped Git tag and
-GitHub Release.
+Release Please runs in manifest mode after each trusted `master` push. The
+repository GitHub App maintains one combined
+`release-please--branches--master` pull request, updates each affected package's
+`VERSION` and `CHANGELOG.md`, and creates exact `<package>/vX.Y.Z` tags and draft
+GitHub Releases when that pull request is squash-merged.
+
+The squash-merge pull-request title is the release signal for every affected
+package: `fix` makes a patch, `feat` makes a minor, and `!` or a
+`BREAKING CHANGE:` footer makes a major. `chore`, `build`, `ci`, `docs`, `test`,
+`refactor`, `style`, and `revert` do not release. Mixed release sizes must be
+split into separate pull requests. `Release-As`, prereleases, direct release
+branches, and manual release dispatches are rejected.
+
+When shared files change, refresh and commit the deterministic consumer markers:
+
+```bash
+python3 ci/release.py shared-markers --write
+```
+
+The publisher discovers Release Please drafts and completes each package
+independently. Ordinary releases build once from the exact tag; a real VAAPI
+artifact update reuses the reviewed probe candidate. After manifest checks,
+SemVer alias promotion, SBOM upload, and provenance attestation, the publisher
+adds the verified image digest to the release and removes its draft status.
+Failed drafts stay resumable and are never silently discarded.
 
 Release runs are serialized and idempotent. A rerun verifies any completed tag
 and continues from the same authorized source commit; releases have no manual
@@ -273,13 +292,13 @@ rollback is a separately approved workflow that can temporarily repoint only
 `latest` to an older verified digest. It records that action in the release.
 
 The VAAPI mod is the one scheduled exception: a weekly dependency probe
-fingerprints only the Alpine-derived files actually shipped. It opens a reviewed
-patch PR only when those bytes, modes, or symlinks change. Renovate pins the
-Alpine base digest but marks base-only motion `release:none`.
+fingerprints only the Alpine-derived files actually shipped. Its bootstrap PR
+is a non-releasing `chore`; it opens a reviewed `fix` PR with an auditable
+candidate only when those bytes, modes, or symlinks change. Renovate maintains
+the pinned Alpine base digest with a non-releasing `chore(deps)` pull request.
 
-The first probe records a reviewed `release:none` fingerprint baseline. Later
-probes compare against the released baseline or an already-open update PR, so
-the same candidate is not replaced when review spans another weekly run.
+Later probes compare against the released baseline or an already-open update
+PR, so the same candidate is not replaced when review spans another weekly run.
 
 SemVer is package-specific:
 
@@ -292,19 +311,21 @@ SemVer is package-specific:
 ### Repository setup
 
 Release automation requires a repository-installed GitHub App whose id and
-private key are stored as `RELEASE_APP_ID` and `RELEASE_APP_PRIVATE_KEY`. Grant
-only the repository permissions used here: Contents and Pull requests write,
-Packages write, and Administration write for the one-time branch/Pages cutover.
+private key are stored as `RELEASE_APP_ID` and `RELEASE_APP_PRIVATE_KEY`. Set
+the exact App bot login in the `RELEASE_APP_LOGIN` repository variable. Grant
+only the repository permissions used here: Contents, Pull requests, and Issues
+write, plus Administration write for the one-time branch/Pages cutover.
 Protect `master` with required pull requests, current branches, resolved
 conversations, and the single `CI / required` check. A ruleset should restrict
 `<package>/v*` tag creation to the release App and deny tag updates/deletion.
-Restrict updates to the `release/next` branch to that App as well; CI rejects
-plans from every other branch and reproduces the plan from `master` fragments.
+Restrict updates to `release-please--branches--master` to that App as well; CI
+rejects generated release changes from every other branch and validates the
+branch's allowed file structure.
 
 Create `release`, `test-publish`, `rollback`, and `cutover` environments. The
-last three require maintainer approval; merging the rolling release PR is the
-approval for `release`. Install Renovate, leave automerge disabled, and use
-GitHub Actions as the Pages source.
+four require maintainer approval. Install Renovate, leave automerge disabled,
+review its pinned Release Please Action updates, and use GitHub Actions as the
+Pages source.
 
 After every initial `1.0.0` release is verified, run **Remove develop and
 nightly** once in dry-run mode. Review its exact package-version, branch, and
@@ -327,8 +348,8 @@ would drift, and the READMEs are what GitHub and the GHCR package pages render
 anyway.
 
 The root [`CHANGELOG.md`](CHANGELOG.md) records repository-wide migration
-history. Each package page links to the package-local changelog generated from
-reviewed change fragments.
+history. Each package page links to the package-local changelog generated by
+Release Please from reviewed Conventional Commit pull-request titles.
 
 Build it locally:
 

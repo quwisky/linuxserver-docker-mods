@@ -51,6 +51,8 @@ if [[ ${WF_DIR} == .github/workflows ]]; then
     publisher="${WF_DIR}/_mod-publish.yml"
     edge="${WF_DIR}/edge.yml"
     test_publisher="${WF_DIR}/test-image.yml"
+    release_please="${WF_DIR}/release-please.yml"
+    release_publisher="${WF_DIR}/publish-releases.yml"
     if [[ ! -f ${ci} ]]; then
         err "${ci} is missing; CI would have no aggregate required check."
         rc=1
@@ -69,6 +71,14 @@ if [[ ${WF_DIR} == .github/workflows ]]; then
     fi
     if [[ ! -f ${test_publisher} ]]; then
         err "${test_publisher} is missing; maintainers could not request test images."
+        rc=1
+    fi
+    if [[ ! -f ${release_please} ]]; then
+        err "${release_please} is missing; package releases could not be planned."
+        rc=1
+    fi
+    if [[ ! -f ${release_publisher} ]]; then
+        err "${release_publisher} is missing; draft releases could not be completed."
         rc=1
     fi
     for legacy in "${WF_DIR}"/mod-*.yml; do
@@ -117,6 +127,27 @@ if [[ ${WF_DIR} == .github/workflows ]]; then
             }
         done
     fi
+    if [[ -f ${release_please} ]]; then
+        grep -qF 'googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7' \
+            "${release_please}" || {
+            err "${release_please} must pin the reviewed Release Please action commit."
+            rc=1
+        }
+        if grep -qF 'workflow_dispatch:' "${release_please}"; then
+            err "${release_please} must not expose a manual release bypass."
+            rc=1
+        fi
+    fi
+    if [[ -f ${release_publisher} ]]; then
+        grep -qF 'workflow_run:' "${release_publisher}" || {
+            err "${release_publisher} must load trusted publication code from master."
+            rc=1
+        }
+        grep -qF './.github/workflows/_mod-publish.yml' "${release_publisher}" || {
+            err "${release_publisher} does not call the trusted publication workflow."
+            rc=1
+        }
+    fi
     if [[ -f ${test_publisher} ]]; then
         grep -qF 'repository_dispatch:' "${test_publisher}" || {
             err "${test_publisher} must load only from the default branch."
@@ -131,7 +162,41 @@ if [[ ${WF_DIR} == .github/workflows ]]; then
             rc=1
         }
     fi
-    for workflow in "${ci}" "${reusable}" "${publisher}" "${edge}" "${test_publisher}"; do
+    if [[ ! -f release-please-config.json ]] || [[ ! -f .release-please-manifest.json ]]; then
+        err "Release Please config and manifest must both exist."
+        rc=1
+    else
+        for i in "${!ids[@]}"; do
+            configured="$(jq -r --arg path "${paths[${i}]}" '.packages[$path].component // empty' \
+                release-please-config.json)"
+            if [[ ${configured} != "${ids[${i}]}" ]]; then
+                err "release-please-config.json does not map ${paths[${i}]} to ${ids[${i}]}"
+                rc=1
+            fi
+        done
+        configured_count="$(jq '.packages | length' release-please-config.json)"
+        if [[ ${configured_count} != "${#ids[@]}" ]]; then
+            err "release-please-config.json has ${configured_count} packages, expected ${#ids[@]}."
+            rc=1
+        fi
+        jq -e --argjson config "$(jq '.packages' release-please-config.json)" '
+          type == "object"
+          and all(to_entries[]; $config[.key] != null)
+          and all(.[]; test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))
+        ' .release-please-manifest.json >/dev/null || {
+            err ".release-please-manifest.json contains an unknown package or invalid version."
+            rc=1
+        }
+    fi
+    for legacy in "${WF_DIR}/release-pr.yml" "${WF_DIR}/release.yml" \
+        "${WF_DIR}/renovate-fragment.yml"; do
+        if [[ -e ${legacy} ]]; then
+            err "${legacy} belongs to the removed custom release planner."
+            rc=1
+        fi
+    done
+    for workflow in "${ci}" "${reusable}" "${publisher}" "${edge}" "${test_publisher}" \
+        "${release_please}" "${release_publisher}"; do
         [[ -f ${workflow} ]] || continue
         if grep -Eq 'refs/heads/develop|(^|[^A-Za-z])nightly([^A-Za-z]|$)' "${workflow}"; then
             err "${workflow} still references the removed develop/nightly channel."

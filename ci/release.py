@@ -1,46 +1,42 @@
 #!/usr/bin/env python3
-"""Release metadata and affected-package orchestration for Docker Mods.
+"""Release Please integration and package discovery for Docker Mods.
 
-The command intentionally uses only Python's standard library.  GitHub Actions,
-maintainer workstations, and the release GitHub App all exercise the same public
-CLI instead of reimplementing package discovery or SemVer policy in YAML.
+Release Please owns versions, changelogs, tags, and draft GitHub Releases.
+This command keeps only repository-specific policy: affected-package routing,
+shared-input markers, Conventional PR validation, and trusted draft discovery.
 """
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
-from datetime import date
-import io
+import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
-import tarfile
-import tempfile
 from typing import Any, Iterable
 
 
 DEFAULT_PLATFORMS = "linux/amd64,linux/arm64"
-BUMP_RANK = {"none": 0, "patch": 1, "minor": 2, "major": 3}
-SHARED_COPY = re.compile(r"(?:^|\s)(shared/[A-Za-z0-9._/-]+)")
+PLATFORMS = re.compile(r"^linux/(?:amd64|arm64)(?:,linux/(?:amd64|arm64))*$")
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+CONVENTIONAL = re.compile(
+    r"^(?P<type>feat|fix|chore|build|docs|test|ci|refactor|style|revert)"
+    r"(?:\([a-z0-9][a-z0-9._/-]*\))?(?P<breaking>!)?: [^\s].+$"
+)
+SHARED_COPY = re.compile(r"(?:^|\s)(shared/[A-Za-z0-9._/-]+)")
 RUNTIME_NAMES = {"Dockerfile", "PLATFORMS"}
-PLAN_FIELDS = {
-    "app",
-    "mod",
-    "id",
-    "dir",
-    "platforms",
-    "previous_version",
-    "version",
-    "bump",
-    "tag",
-    "notes",
-    "candidate_ref",
-    "candidate_digest",
-}
+RELEASE_BRANCH = "release-please--branches--master"
+SHARED_MARKER = ".release-please-shared.json"
+VAAPI_CANDIDATE = "VAAPI-CANDIDATE.json"
+VAAPI_FINGERPRINT = "VAAPI-FINGERPRINT.json"
+RELEASE_PR_FILES = re.compile(
+    r"^(?:\.release-please-manifest\.json|mods/[^/]+/[^/]+/(?:VERSION|CHANGELOG\.md))$"
+)
 
 
 class ReleaseError(RuntimeError):
@@ -57,16 +53,7 @@ class Package:
     version: str
 
 
-@dataclass(frozen=True)
-class Fragment:
-    path: Path
-    summary: str
-    packages: dict[str, str]
-    shared: dict[str, str]
-    candidates: dict[str, dict[str, str]]
-
-
-def run_git(repo: Path, *args: str) -> str:
+def run_git(repo: Path, *args: str, check: bool = True) -> str:
     result = subprocess.run(
         ["git", *args],
         cwd=repo,
@@ -75,7 +62,7 @@ def run_git(repo: Path, *args: str) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    if result.returncode:
+    if check and result.returncode:
         raise ReleaseError(result.stderr.strip() or f"git {' '.join(args)} failed")
     return result.stdout.strip()
 
@@ -112,30 +99,19 @@ def discover_packages(repo: Path) -> list[Package]:
         if not SEMVER.fullmatch(version):
             raise ReleaseError(f"{relative}/VERSION is not a plain SemVer version: {version}")
         platforms = read_one_line(directory / "PLATFORMS", DEFAULT_PLATFORMS)
-        packages.append(
-            Package(
-                app=app,
-                mod=mod,
-                id=package_id,
-                dir=relative,
-                platforms=platforms,
-                version=version,
-            )
-        )
+        if not PLATFORMS.fullmatch(platforms):
+            raise ReleaseError(f"{relative}/PLATFORMS is unsupported: {platforms}")
+        packages.append(Package(app, mod, package_id, relative, platforms, version))
     return packages
 
 
 def shared_inputs(repo: Path, package: Package) -> set[str]:
-    dockerfile = repo / package.dir / "Dockerfile"
     result: set[str] = set()
+    dockerfile = repo / package.dir / "Dockerfile"
     for line in dockerfile.read_text(encoding="utf-8").splitlines():
-        stripped = line.lstrip()
-        if not stripped.startswith("COPY"):
+        if not line.lstrip().startswith("COPY"):
             continue
-        for match in SHARED_COPY.finditer(stripped):
-            # A shared component is the first directory below shared/.  COPY
-            # may name a file below it, but release fan-out belongs to the
-            # component as a whole.
+        for match in SHARED_COPY.finditer(line):
             parts = match.group(1).split("/")
             if len(parts) >= 2:
                 result.add(parts[1])
@@ -145,8 +121,8 @@ def shared_inputs(repo: Path, package: Package) -> set[str]:
 def consumers(repo: Path, packages: Iterable[Package]) -> dict[str, set[str]]:
     result: dict[str, set[str]] = {}
     for package in packages:
-        for shared in shared_inputs(repo, package):
-            result.setdefault(shared, set()).add(package.id)
+        for component in shared_inputs(repo, package):
+            result.setdefault(component, set()).add(package.id)
     return result
 
 
@@ -155,319 +131,60 @@ def changed_files(repo: Path, base: str, head: str) -> list[str]:
     return [line for line in output.splitlines() if line]
 
 
-def fragments_in(repo: Path, paths: Iterable[str] | None = None) -> list[Fragment]:
-    if paths is None:
-        candidates = sorted((repo / ".changes").glob("*.json"))
-    else:
-        candidates = [repo / path for path in paths if path.startswith(".changes/") and path.endswith(".json")]
-    fragments: list[Fragment] = []
-    for path in candidates:
-        if not path.is_file():
-            continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as error:
-            raise ReleaseError(f"{path.relative_to(repo)} is not valid JSON: {error}") from error
-        if not isinstance(data, dict):
-            raise ReleaseError(f"{path.relative_to(repo)} must contain a JSON object")
-        allowed = {"summary", "packages", "shared", "candidates"}
-        unknown = sorted(set(data) - allowed)
-        if unknown:
-            raise ReleaseError(f"{path.relative_to(repo)} has unknown keys: {', '.join(unknown)}")
-        summary = data.get("summary")
-        if not isinstance(summary, str) or not summary.strip():
-            raise ReleaseError(f"{path.relative_to(repo)} needs a non-empty summary")
-        package_bumps = validate_bump_map(path, "packages", data.get("packages", {}))
-        shared_bumps = validate_bump_map(path, "shared", data.get("shared", {}))
-        raw_candidates = data.get("candidates", {})
-        if not isinstance(raw_candidates, dict):
-            raise ReleaseError(f"{path.relative_to(repo)} candidates must be an object")
-        normalized_candidates: dict[str, dict[str, str]] = {}
-        for package_id, candidate in raw_candidates.items():
-            if not isinstance(candidate, dict):
-                raise ReleaseError(f"{path.relative_to(repo)} candidate for {package_id} must be an object")
-            if set(candidate) != {"ref", "digest"}:
-                raise ReleaseError(
-                    f"{path.relative_to(repo)} candidate for {package_id} needs exactly ref and digest"
-                )
-            ref = candidate["ref"]
-            digest = candidate["digest"]
-            if not isinstance(ref, str) or not ref:
-                raise ReleaseError(f"{path.relative_to(repo)} candidate ref for {package_id} is empty")
-            if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
-                raise ReleaseError(f"{path.relative_to(repo)} candidate digest for {package_id} is invalid")
-            normalized_candidates[package_id] = {"ref": ref, "digest": digest}
-        if not package_bumps and not shared_bumps:
-            raise ReleaseError(f"{path.relative_to(repo)} names no package or shared component")
-        fragments.append(
-            Fragment(
-                path=path,
-                summary=summary.strip(),
-                packages=package_bumps,
-                shared=shared_bumps,
-                candidates=normalized_candidates,
-            )
-        )
-    return fragments
-
-
-def validate_bump_map(path: Path, field: str, value: Any) -> dict[str, str]:
-    if not isinstance(value, dict):
-        raise ReleaseError(f"{path} {field} must be an object")
-    result: dict[str, str] = {}
-    for name, bump in value.items():
-        if not isinstance(name, str) or not name:
-            raise ReleaseError(f"{path} {field} contains an empty name")
-        if bump not in BUMP_RANK:
-            raise ReleaseError(f"{path} {field}.{name} must be none, patch, minor, or major")
-        result[name] = bump
-    return result
-
-
-def expand_fragments(
-    repo: Path, packages: list[Package], fragments: Iterable[Fragment]
-) -> tuple[dict[str, str], dict[str, list[str]], dict[str, dict[str, str]]]:
-    package_by_id = {package.id: package for package in packages}
-    by_shared = consumers(repo, packages)
-    bumps: dict[str, str] = {}
-    notes: dict[str, list[str]] = {}
-    candidates: dict[str, dict[str, str]] = {}
-
-    for fragment in fragments:
-        expanded: dict[str, str] = {}
-        for shared, bump in fragment.shared.items():
-            if shared not in by_shared:
-                raise ReleaseError(f"{fragment.path.name} names unknown or unused shared component {shared}")
-            for package_id in by_shared[shared]:
-                existing = expanded.get(package_id, "none")
-                if BUMP_RANK[bump] > BUMP_RANK[existing]:
-                    expanded[package_id] = bump
-        for package_id, bump in fragment.packages.items():
-            if package_id not in package_by_id:
-                raise ReleaseError(f"{fragment.path.name} names unknown package {package_id}")
-            inherited = expanded.get(package_id)
-            if inherited and BUMP_RANK[bump] < BUMP_RANK[inherited]:
-                raise ReleaseError(
-                    f"{fragment.path.name} lowers {package_id} from shared {inherited} to {bump}"
-                )
-            expanded[package_id] = bump
-        for package_id, bump in expanded.items():
-            previous = bumps.get(package_id, "none")
-            if previous != "none" and bump == "none":
-                raise ReleaseError(f"{package_id} has both release and release:none intent")
-            if previous == "none" and bump != "none" or BUMP_RANK[bump] > BUMP_RANK[previous]:
-                bumps[package_id] = bump
-            else:
-                bumps.setdefault(package_id, bump)
-            notes.setdefault(package_id, []).append(fragment.summary)
-        for package_id, candidate in fragment.candidates.items():
-            if package_id not in expanded:
-                raise ReleaseError(f"{fragment.path.name} has a candidate for unaffected {package_id}")
-            if expanded[package_id] == "none":
-                raise ReleaseError(f"{fragment.path.name} cannot attach a candidate to release:none")
-            if package_id in candidates:
-                raise ReleaseError(f"multiple candidate artifacts supplied for {package_id}")
-            candidates[package_id] = candidate
-    for package_id in candidates:
-        if len(notes[package_id]) != 1:
-            raise ReleaseError(
-                f"{package_id} has a reviewed candidate plus another release intent; "
-                "rebuild one candidate from the combined change"
-            )
-    return bumps, notes, candidates
-
-
-def bump_version(version: str, bump: str) -> str:
-    match = SEMVER.fullmatch(version)
-    if not match:
-        raise ReleaseError(f"invalid SemVer version {version}")
-    major, minor, patch = (int(value) for value in match.groups())
-    if bump == "patch":
-        patch += 1
-    elif bump == "minor":
-        minor += 1
-        patch = 0
-    elif bump == "major":
-        major += 1
-        minor = 0
-        patch = 0
-    else:
-        raise ReleaseError(f"cannot version-bump {bump}")
-    return f"{major}.{minor}.{patch}"
-
-
-def build_plan(repo: Path) -> dict[str, Any]:
-    packages = discover_packages(repo)
-    bumps, notes, candidates = expand_fragments(repo, packages, fragments_in(repo))
-    entries: list[dict[str, Any]] = []
-    for package in packages:
-        bump = bumps.get(package.id, "none")
-        if bump == "none":
-            continue
-        version = bump_version(package.version, bump)
-        entry: dict[str, Any] = {
-            **asdict(package),
-            "previous_version": package.version,
-            "version": version,
-            "bump": bump,
-            "tag": f"{package.id}/v{version}",
-            "notes": notes[package.id],
-            "candidate_ref": "",
-            "candidate_digest": "",
-        }
-        if package.id in candidates:
-            entry["candidate_ref"] = candidates[package.id]["ref"]
-            entry["candidate_digest"] = candidates[package.id]["digest"]
-        entries.append(entry)
-    source_sha = ""
-    if (repo / ".git").exists():
-        try:
-            source_sha = run_git(repo, "rev-parse", "HEAD")
-        except ReleaseError:
-            # A freshly scaffolded repository can prepare its first release
-            # metadata before its initial commit.  Real release automation is
-            # always on a commit, but package planning itself does not require
-            # one.
-            source_sha = ""
-    return {"source_sha": source_sha, "packages": entries}
-
-
-def read_plan(repo: Path) -> dict[str, Any]:
-    path = repo / ".release/plan.json"
-    try:
-        plan = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as error:
-        raise ReleaseError(".release/plan.json is missing") from error
-    except json.JSONDecodeError as error:
-        raise ReleaseError(f".release/plan.json is not valid JSON: {error}") from error
-    if not isinstance(plan, dict) or set(plan) != {"source_sha", "packages"}:
-        raise ReleaseError("release plan needs exactly source_sha and packages")
-    if not isinstance(plan["source_sha"], str) or not re.fullmatch(
-        r"[0-9a-f]{40}", plan["source_sha"]
-    ):
-        raise ReleaseError("release plan source_sha must be a full lowercase commit SHA")
-    if not isinstance(plan["packages"], list):
-        raise ReleaseError("release plan packages must be an array")
-    return plan
-
-
-def validate_plan_structure(repo: Path, plan: dict[str, Any], owner: str = "") -> None:
-    packages = {package.id: package for package in discover_packages(repo)}
-    seen: set[str] = set()
-    for index, entry in enumerate(plan["packages"]):
-        label = f"release plan package {index}"
-        if not isinstance(entry, dict) or set(entry) != PLAN_FIELDS:
-            raise ReleaseError(f"{label} has an invalid field set")
-        package_id = entry["id"]
-        if not isinstance(package_id, str) or package_id not in packages:
-            raise ReleaseError(f"{label} names unknown package {package_id}")
-        if package_id in seen:
-            raise ReleaseError(f"release plan repeats package {package_id}")
-        seen.add(package_id)
-        package = packages[package_id]
-        for field in ("app", "mod", "dir", "platforms"):
-            if entry[field] != getattr(package, field):
-                raise ReleaseError(f"release plan {package_id} has incorrect {field}")
-        previous = entry["previous_version"]
-        version = entry["version"]
-        bump = entry["bump"]
-        if not isinstance(previous, str) or not SEMVER.fullmatch(previous):
-            raise ReleaseError(f"release plan {package_id} has invalid previous_version")
-        if bump not in {"patch", "minor", "major"}:
-            raise ReleaseError(f"release plan {package_id} has invalid bump")
-        if version != bump_version(previous, bump) or version != package.version:
-            raise ReleaseError(f"release plan {package_id} version does not match its bump and VERSION")
-        if entry["tag"] != f"{package_id}/v{version}":
-            raise ReleaseError(f"release plan {package_id} has an invalid Git tag")
-        notes = entry["notes"]
-        if not isinstance(notes, list) or not notes or not all(
-            isinstance(note, str) and note.strip() for note in notes
-        ):
-            raise ReleaseError(f"release plan {package_id} needs non-empty notes")
-        candidate_ref = entry["candidate_ref"]
-        candidate_digest = entry["candidate_digest"]
-        if not isinstance(candidate_ref, str) or not isinstance(candidate_digest, str):
-            raise ReleaseError(f"release plan {package_id} candidate fields must be strings")
-        if bool(candidate_ref) != bool(candidate_digest):
-            raise ReleaseError(f"release plan {package_id} has an incomplete candidate")
-        if candidate_ref:
-            prefix = f"ghcr.io/{owner}/{package_id}:" if owner else "ghcr.io/"
-            if not candidate_ref.startswith(prefix) or "@" in candidate_ref:
-                raise ReleaseError(f"release plan {package_id} has an invalid candidate ref")
-            if not owner and f"/{package_id}:" not in candidate_ref:
-                raise ReleaseError(f"release plan {package_id} candidate targets another package")
-            if not re.fullmatch(r"sha256:[0-9a-f]{64}", candidate_digest):
-                raise ReleaseError(f"release plan {package_id} has an invalid candidate digest")
-
-
-def verify_plan(repo: Path, base: str = "", owner: str = "") -> None:
-    plan = read_plan(repo)
-    validate_plan_structure(repo, plan, owner.lower())
-    if not base:
-        return
-    resolved_base = run_git(repo, "rev-parse", "--verify", f"{base}^{{commit}}")
-    archive = subprocess.run(
-        ["git", "archive", "--format=tar", resolved_base],
-        cwd=repo,
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if archive.returncode:
-        raise ReleaseError(archive.stderr.decode().strip() or "git archive failed")
-    with tempfile.TemporaryDirectory() as temporary:
-        snapshot = Path(temporary)
-        with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as tar:
-            tar.extractall(snapshot, filter="data")
-        expected = build_plan(snapshot)
-    expected["source_sha"] = resolved_base
-    if plan != expected:
-        raise ReleaseError("release plan does not exactly match the base branch change fragments")
-
-
-def affected_packages(repo: Path, base: str, head: str) -> dict[str, list[dict[str, Any]]]:
-    packages = discover_packages(repo)
-    package_by_dir = {package.dir: package for package in packages}
-    by_shared = consumers(repo, packages)
-    changed = changed_files(repo, base, head)
-    affected: set[str] = set()
-    all_packages = False
-    global_ci = {
-        ".dockerignore",
-        ".github/workflows/_mod-ci.yml",
-        ".github/workflows/_mod-publish.yml",
-        ".github/workflows/ci.yml",
-        "ci/release.py",
-        "ci/mod-inputs.sh",
-        "ci/verify-published-mod.sh",
-    }
-    for path in changed:
-        if path in global_ci or path.startswith("template/"):
-            all_packages = True
-        for directory, package in package_by_dir.items():
-            if path == directory or path.startswith(f"{directory}/"):
-                affected.add(package.id)
-        if path.startswith("shared/"):
-            parts = path.split("/")
-            if len(parts) >= 2:
-                affected.update(by_shared.get(parts[1], set()))
-    if all_packages:
-        affected = {package.id for package in packages}
-
-    _, _, candidates = expand_fragments(repo, packages, fragments_in(repo))
-    include: list[dict[str, Any]] = []
-    for package in packages:
-        if package.id not in affected:
-            continue
-        item = asdict(package)
-        if package.id in candidates:
-            item["candidate_ref"] = candidates[package.id]["ref"]
-            item["candidate_digest"] = candidates[package.id]["digest"]
+def shared_digest(directory: Path) -> str:
+    if not directory.is_dir():
+        raise ReleaseError(f"shared component is missing: {directory}")
+    digest = hashlib.sha256()
+    for path in sorted(directory.rglob("*"), key=lambda item: item.relative_to(directory).as_posix()):
+        relative = path.relative_to(directory).as_posix()
+        metadata = path.lstat()
+        mode = stat.S_IMODE(metadata.st_mode)
+        if path.is_symlink():
+            kind = "symlink"
+            payload = os.readlink(path).encode()
+        elif path.is_dir():
+            kind = "directory"
+            payload = b""
+        elif path.is_file():
+            kind = "file"
+            payload = path.read_bytes()
         else:
-            item["candidate_ref"] = ""
-            item["candidate_digest"] = ""
-        include.append(item)
-    return {"include": include}
+            raise ReleaseError(f"unsupported shared input: {path}")
+        digest.update(f"{relative}\0{kind}\0{mode:o}\0".encode())
+        digest.update(payload)
+        digest.update(b"\0")
+    return f"sha256:{digest.hexdigest()}"
+
+
+def expected_shared_marker(repo: Path, package: Package) -> dict[str, str]:
+    return {
+        component: shared_digest(repo / "shared" / component)
+        for component in sorted(shared_inputs(repo, package))
+    }
+
+
+def shared_markers(repo: Path, write: bool) -> list[str]:
+    changed: list[str] = []
+    for package in discover_packages(repo):
+        marker = repo / package.dir / SHARED_MARKER
+        expected = expected_shared_marker(repo, package)
+        rendered = json.dumps(expected, indent=2, sort_keys=True) + "\n"
+        current = marker.read_text(encoding="utf-8") if marker.is_file() else ""
+        if expected:
+            if current != rendered:
+                if not write:
+                    raise ReleaseError(
+                        f"{marker.relative_to(repo)} is stale; run "
+                        "python3 ci/release.py shared-markers --write"
+                    )
+                marker.write_text(rendered, encoding="utf-8")
+                changed.append(marker.relative_to(repo).as_posix())
+        elif marker.exists():
+            if not write:
+                raise ReleaseError(f"{marker.relative_to(repo)} is obsolete")
+            marker.unlink()
+            changed.append(marker.relative_to(repo).as_posix())
+    return changed
 
 
 def runtime_packages(repo: Path, packages: list[Package], paths: Iterable[str]) -> set[str]:
@@ -489,61 +206,269 @@ def runtime_packages(repo: Path, packages: list[Package], paths: Iterable[str]) 
     return result
 
 
-def validate_release_intent(repo: Path, base: str, head: str) -> None:
+def routed_packages(packages: list[Package], paths: Iterable[str]) -> set[str]:
+    return {
+        package.id
+        for package in packages
+        for path in paths
+        if path.startswith(f"{package.dir}/")
+    }
+
+
+def signal_packages(packages: list[Package], paths: Iterable[str]) -> set[str]:
+    path_set = set(paths)
+    return {
+        package.id
+        for package in packages
+        if f"{package.dir}/{VAAPI_CANDIDATE}" in path_set
+    }
+
+
+def affected_packages(repo: Path, base: str, head: str, runtime_only: bool) -> dict[str, Any]:
     packages = discover_packages(repo)
+    by_shared = consumers(repo, packages)
     paths = changed_files(repo, base, head)
-    changed_fragment_paths = [path for path in paths if path.startswith(".changes/")]
-    fragments = fragments_in(repo, changed_fragment_paths)
-    bumps, _, _ = expand_fragments(repo, packages, fragments)
-    missing = sorted(runtime_packages(repo, packages, paths) - set(bumps))
-    if missing:
-        joined = "\n".join(f"{package_id} has runtime changes but no release intent" for package_id in missing)
-        raise ReleaseError(joined)
+    affected: set[str] = set()
+    global_ci = {
+        ".dockerignore",
+        ".github/workflows/_mod-ci.yml",
+        ".github/workflows/_mod-publish.yml",
+        ".github/workflows/ci.yml",
+        "ci/release.py",
+        "ci/mod-inputs.sh",
+        "ci/verify-published-mod.sh",
+    }
+    if not runtime_only and any(path in global_ci or path.startswith("template/") for path in paths):
+        affected = {package.id for package in packages}
+    for path in paths:
+        if path.startswith("shared/"):
+            parts = path.split("/")
+            if len(parts) >= 2:
+                affected.update(by_shared.get(parts[1], set()))
+        for package in packages:
+            prefix = f"{package.dir}/"
+            if not path.startswith(prefix):
+                continue
+            relative = path[len(prefix) :]
+            if not runtime_only or relative.startswith("root/") or relative in RUNTIME_NAMES:
+                affected.add(package.id)
+    return {"include": [asdict(package) for package in packages if package.id in affected]}
 
 
-def prepend_changelog(path: Path, version: str, notes: list[str]) -> None:
-    existing = path.read_text(encoding="utf-8") if path.exists() else "# Changelog\n"
-    if not existing.startswith("# Changelog"):
-        raise ReleaseError(f"{path} must begin with '# Changelog'")
-    header, _, rest = existing.partition("\n")
-    entry = [f"## {version} - {date.today().isoformat()}", ""]
-    entry.extend(f"- {note}" for note in notes)
-    entry.append("")
-    path.write_text(f"{header}\n\n" + "\n".join(entry) + rest.lstrip("\n"), encoding="utf-8")
+def git_file(repo: Path, revision: str, path: str) -> str:
+    return run_git(repo, "show", f"{revision}:{path}")
 
 
-def prepare(repo: Path) -> dict[str, Any]:
-    plan = build_plan(repo)
-    for item in plan["packages"]:
-        directory = repo / item["dir"]
-        (directory / "VERSION").write_text(f"{item['version']}\n", encoding="utf-8")
-        prepend_changelog(directory / "CHANGELOG.md", item["version"], item["notes"])
-    release_dir = repo / ".release"
-    release_dir.mkdir(parents=True, exist_ok=True)
-    (release_dir / "plan.json").write_text(
-        json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+def is_vaapi_digest_only(repo: Path, base: str, head: str, paths: list[str]) -> bool:
+    dockerfile = "mods/plex/vaapi-amdgpu-mod/Dockerfile"
+    if paths != [dockerfile]:
+        return False
+    before = git_file(repo, base, dockerfile)
+    after = git_file(repo, head, dockerfile)
+    pattern = re.compile(r"(\balpine:edge)(?:@sha256:[0-9a-f]{64})?")
+    return (
+        len(pattern.findall(before)) == 1
+        and len(pattern.findall(after)) == 1
+        and pattern.sub(r"\1@DIGEST", before) == pattern.sub(r"\1@DIGEST", after)
+        and before != after
     )
-    changes = repo / ".changes"
-    if changes.is_dir():
-        for fragment in changes.glob("*.json"):
-            fragment.unlink()
-    return plan
+
+
+def validate_pr(
+    repo: Path,
+    base: str,
+    head: str,
+    title: str,
+    body: str,
+    head_ref: str,
+    head_repo: str,
+    repository: str,
+    author: str,
+    expected_release_author: str,
+) -> None:
+    paths = sorted(changed_files(repo, base, head))
+    shared_markers(repo, write=False)
+    messages = run_git(repo, "log", "--format=%B", f"{base}..{head}")
+    if re.search(r"(?im)^Release-As:\s*", f"{title}\n{body}\n{messages}"):
+        raise ReleaseError("Release-As overrides are forbidden")
+
+    if head_ref == RELEASE_BRANCH:
+        if head_repo != repository:
+            raise ReleaseError("the Release Please PR must come from this repository")
+        if not expected_release_author or author != expected_release_author:
+            raise ReleaseError(
+                "the Release Please PR author does not match repository variable RELEASE_APP_LOGIN"
+            )
+        unexpected = [path for path in paths if not RELEASE_PR_FILES.fullmatch(path)]
+        if unexpected:
+            raise ReleaseError("Release Please PR contains unexpected files: " + ", ".join(unexpected))
+        if ".release-please-manifest.json" not in paths:
+            raise ReleaseError("Release Please PR did not update the manifest")
+        return
+
+    match = CONVENTIONAL.fullmatch(title)
+    if not match:
+        raise ReleaseError("pull request title is not an allowed Conventional Commit subject")
+    commit_type = match.group("type")
+    breaking = bool(match.group("breaking")) or bool(
+        re.search(r"(?im)^BREAKING(?: |-)?CHANGE:\s*\S", body)
+    )
+    releasable = commit_type in {"feat", "fix"} or breaking
+    packages = discover_packages(repo)
+    runtime = runtime_packages(repo, packages, paths)
+    relevant = runtime | signal_packages(packages, paths)
+    routed = routed_packages(packages, paths)
+    if releasable:
+        if not relevant:
+            raise ReleaseError("releasable PR has no runtime or audited artifact change")
+        accidental = sorted(routed - relevant)
+        if accidental:
+            raise ReleaseError(
+                "releasable PR would bump packages with metadata-only changes: " + ", ".join(accidental)
+            )
+    elif runtime:
+        if commit_type == "chore" and is_vaapi_digest_only(repo, base, head, paths):
+            return
+        raise ReleaseError(
+            "runtime changes require fix, feat, or breaking release intent: "
+            + ", ".join(sorted(runtime))
+        )
+
+
+def tag_exists(repo: Path, tag: str) -> bool:
+    return bool(run_git(repo, "rev-parse", "--verify", f"refs/tags/{tag}", check=False))
+
+
+def previous_tag(repo: Path, package_id: str, current: str) -> str:
+    tags = run_git(repo, "tag", "--list", f"{package_id}/v*", "--sort=-v:refname").splitlines()
+    for index, tag in enumerate(tags):
+        if tag == current:
+            return tags[index + 1] if index + 1 < len(tags) else ""
+    return ""
+
+
+def candidate_from_tag(repo: Path, package: Package, tag: str, owner: str) -> tuple[str, str]:
+    candidate_path = f"{package.dir}/{VAAPI_CANDIDATE}"
+    candidate_exists = subprocess.run(
+        ["git", "cat-file", "-e", f"{tag}:{candidate_path}"], cwd=repo
+    )
+    if candidate_exists.returncode:
+        return "", ""
+    previous = previous_tag(repo, package.id, tag)
+    if previous:
+        unchanged = subprocess.run(
+            ["git", "diff", "--quiet", previous, tag, "--", candidate_path], cwd=repo
+        )
+        if unchanged.returncode == 0:
+            return "", ""
+    try:
+        candidate = json.loads(git_file(repo, tag, candidate_path))
+    except json.JSONDecodeError as error:
+        raise ReleaseError(f"{candidate_path} is invalid JSON at {tag}: {error}") from error
+    required = {"fingerprint", "ref", "digest", "source_sha"}
+    if not isinstance(candidate, dict) or set(candidate) != required:
+        raise ReleaseError(f"{candidate_path} must contain exactly {', '.join(sorted(required))}")
+    fingerprint = candidate["fingerprint"]
+    reference = candidate["ref"]
+    digest = candidate["digest"]
+    source_sha = candidate["source_sha"]
+    if not isinstance(fingerprint, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", fingerprint):
+        raise ReleaseError("VAAPI candidate fingerprint is invalid")
+    expected_ref = f"ghcr.io/{owner}/{package.id}:candidate-vaapi-"
+    if not isinstance(reference, str) or not reference.startswith(expected_ref) or "@" in reference:
+        raise ReleaseError("VAAPI candidate ref is invalid")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ReleaseError("VAAPI candidate digest is invalid")
+    if not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+        raise ReleaseError("VAAPI candidate source_sha is invalid")
+    ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", source_sha, tag], cwd=repo)
+    if ancestor.returncode:
+        raise ReleaseError("VAAPI candidate source is not an ancestor of the release tag")
+    fingerprint_path = f"{package.dir}/{VAAPI_FINGERPRINT}"
+    fingerprint_data = json.loads(git_file(repo, tag, fingerprint_path))
+    if fingerprint_data.get("fingerprint") != fingerprint:
+        raise ReleaseError("VAAPI candidate does not match the recorded fingerprint")
+    runtime_paths = [
+        f"{package.dir}/Dockerfile",
+        f"{package.dir}/PLATFORMS",
+        f"{package.dir}/root",
+        *[f"shared/{component}" for component in sorted(shared_inputs(repo, package))],
+    ]
+    unchanged = subprocess.run(
+        ["git", "diff", "--quiet", source_sha, tag, "--", *runtime_paths], cwd=repo
+    )
+    if unchanged.returncode:
+        raise ReleaseError("VAAPI runtime changed after the reviewed candidate was built")
+    return reference, digest
+
+
+def release_matrix(repo: Path, releases_path: Path, owner: str) -> dict[str, Any]:
+    data = json.loads(releases_path.read_text(encoding="utf-8"))
+    releases: list[Any] = []
+    for item in data:
+        releases.extend(item if isinstance(item, list) else [item])
+    packages = {package.id: package for package in discover_packages(repo)}
+    include: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for release in releases:
+        if not isinstance(release, dict) or release.get("draft") is not True:
+            continue
+        tag = release.get("tag_name", "")
+        match = re.fullmatch(
+            r"(.+)/v((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))", tag
+        )
+        if not match or match.group(1) not in packages:
+            continue
+        if tag in seen:
+            raise ReleaseError(f"duplicate draft release for {tag}")
+        seen.add(tag)
+        package = packages[match.group(1)]
+        version = match.group(2)
+        if not tag_exists(repo, tag):
+            raise ReleaseError(f"draft release tag is missing locally: {tag}")
+        if git_file(repo, tag, f"{package.dir}/VERSION").strip() != version:
+            raise ReleaseError(f"{tag} does not match {package.dir}/VERSION")
+        source_sha = run_git(repo, "rev-list", "-n", "1", tag)
+        candidate_ref, candidate_digest = candidate_from_tag(repo, package, tag, owner)
+        item = asdict(package)
+        item.update(
+            {
+                "version": version,
+                "tag": tag,
+                "source_sha": source_sha,
+                "candidate_ref": candidate_ref,
+                "candidate_digest": candidate_digest,
+            }
+        )
+        include.append(item)
+    include.sort(key=lambda item: (item["id"], item["version"]))
+    return {"include": include}
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--repo", type=Path, default=Path.cwd())
-    subcommands = result.add_subparsers(dest="command", required=True)
-    subcommands.add_parser("packages")
-    for name in ("affected", "validate"):
-        command = subcommands.add_parser(name)
-        command.add_argument("--base", required=True)
-        command.add_argument("--head", required=True)
-    subcommands.add_parser("plan")
-    subcommands.add_parser("prepare")
-    verify = subcommands.add_parser("verify-plan")
-    verify.add_argument("--base", default="")
-    verify.add_argument("--owner", default="")
+    commands = result.add_subparsers(dest="command", required=True)
+    commands.add_parser("packages")
+    affected = commands.add_parser("affected")
+    affected.add_argument("--base", required=True)
+    affected.add_argument("--head", required=True)
+    affected.add_argument("--runtime-only", action="store_true")
+    markers = commands.add_parser("shared-markers")
+    markers.add_argument("--write", action="store_true")
+    validate = commands.add_parser("validate-pr")
+    validate.add_argument("--base", required=True)
+    validate.add_argument("--head", required=True)
+    validate.add_argument("--title", required=True)
+    validate.add_argument("--body", default="")
+    validate.add_argument("--head-ref", required=True)
+    validate.add_argument("--head-repo", required=True)
+    validate.add_argument("--repository", required=True)
+    validate.add_argument("--author", required=True)
+    validate.add_argument("--expected-release-author", default="")
+    drafts = commands.add_parser("release-matrix")
+    drafts.add_argument("--releases", type=Path, required=True)
+    drafts.add_argument("--owner", required=True)
     return result
 
 
@@ -554,25 +479,32 @@ def main() -> int:
         if arguments.command == "packages":
             output: Any = [asdict(package) for package in discover_packages(repo)]
         elif arguments.command == "affected":
-            output = affected_packages(repo, arguments.base, arguments.head)
-        elif arguments.command == "validate":
-            validate_release_intent(repo, arguments.base, arguments.head)
-            print("release intent is valid")
+            output = affected_packages(repo, arguments.base, arguments.head, arguments.runtime_only)
+        elif arguments.command == "shared-markers":
+            output = {"changed": shared_markers(repo, arguments.write)}
+        elif arguments.command == "validate-pr":
+            validate_pr(
+                repo,
+                arguments.base,
+                arguments.head,
+                arguments.title,
+                arguments.body,
+                arguments.head_ref,
+                arguments.head_repo,
+                arguments.repository,
+                arguments.author,
+                arguments.expected_release_author,
+            )
+            print("pull request release contract is valid")
             return 0
-        elif arguments.command == "plan":
-            output = build_plan(repo)
-        elif arguments.command == "prepare":
-            output = prepare(repo)
-        elif arguments.command == "verify-plan":
-            verify_plan(repo, arguments.base, arguments.owner)
-            print("release plan is valid")
-            return 0
-        else:  # pragma: no cover - argparse enforces the command set.
+        elif arguments.command == "release-matrix":
+            output = release_matrix(repo, arguments.releases, arguments.owner.lower())
+        else:
             raise AssertionError(arguments.command)
-        print(json.dumps(output, indent=None, sort_keys=True))
+        print(json.dumps(output, indent=2, sort_keys=True))
         return 0
-    except ReleaseError as error:
-        print(f"error: {error}", file=sys.stderr)
+    except (OSError, ReleaseError, json.JSONDecodeError) as error:
+        print(f"release error: {error}", file=sys.stderr)
         return 1
 
 

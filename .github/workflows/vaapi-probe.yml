@@ -3,7 +3,6 @@ name: VAAPI dependency probe
 on:
   schedule:
     - cron: '17 4 * * 1'
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -144,22 +143,21 @@ jobs:
           git switch --force-create "${branch}" origin/master
           cp "${RUNNER_TEMP}/VAAPI-FINGERPRINT.json" "${DIR}/VAAPI-FINGERPRINT.json"
           cp "${RUNNER_TEMP}/VAAPI-PACKAGES.txt" "${DIR}/VAAPI-PACKAGES.txt"
-          fragment='.changes/vaapi-runtime.json'
+          candidate_record="${DIR}/VAAPI-CANDIDATE.json"
           if [[ ${BOOTSTRAP} == true ]]; then
-            jq -n '{
-              summary: "Establish the shipped VAAPI artifact baseline without releasing it.",
-              packages: {"plex-vaapi-amdgpu-mod": "none"}
-            }' >"${fragment}"
+            rm -f "${candidate_record}"
             title='chore(plex-vaapi-amdgpu-mod): establish runtime baseline'
           else
-            jq -n --arg ref "${CANDIDATE}" --arg digest "${DIGEST}" '{
-              summary: "Refresh the shipped VAAPI runtime libraries from Alpine edge.",
-              packages: {"plex-vaapi-amdgpu-mod": "patch"},
-              candidates: {"plex-vaapi-amdgpu-mod": {ref: $ref, digest: $digest}}
-            }' >"${fragment}"
-            title='chore(plex-vaapi-amdgpu-mod): refresh runtime libraries'
+            jq -n \
+              --arg fingerprint "${FINGERPRINT}" \
+              --arg ref "${CANDIDATE}" \
+              --arg digest "${DIGEST}" \
+              --arg source_sha "${GITHUB_SHA}" \
+              '{fingerprint: $fingerprint, ref: $ref, digest: $digest, source_sha: $source_sha}' \
+              >"${candidate_record}"
+            title='fix(plex-vaapi-amdgpu-mod): refresh runtime libraries'
           fi
-          git add "${DIR}/VAAPI-FINGERPRINT.json" "${DIR}/VAAPI-PACKAGES.txt" "${fragment}"
+          git add -A -- "${DIR}/VAAPI-FINGERPRINT.json" "${DIR}/VAAPI-PACKAGES.txt" "${candidate_record}"
           git config user.name 'linuxserver-docker-mods-release[bot]'
           git config user.email 'linuxserver-docker-mods-release[bot]@users.noreply.github.com'
           git commit -m "${title}"

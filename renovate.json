@@ -1,7 +1,7 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended", "docker:pinDigests"],
-  "enabledManagers": ["dockerfile"],
+  "enabledManagers": ["dockerfile", "github-actions"],
   "dependencyDashboard": true,
   "packageRules": [
     {
@@ -10,11 +10,25 @@
       "matchFileNames": ["mods/plex/vaapi-amdgpu-mod/Dockerfile"],
       "matchPackageNames": ["alpine"],
       "automerge": false,
-      "labels": ["dependencies", "release:none"]
+      "labels": ["dependencies"],
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
     },
     {
       "description": "Never automerge container build inputs",
       "matchManagers": ["dockerfile"],
+      "automerge": false
+    },
+    {
+      "description": "Ignore unrelated GitHub Action updates",
+      "matchManagers": ["github-actions"],
+      "enabled": false
+    },
+    {
+      "description": "Review pinned Release Please action updates",
+      "matchManagers": ["github-actions"],
+      "matchDepNames": ["googleapis/release-please-action"],
+      "enabled": true,
       "automerge": false
     }
   ]

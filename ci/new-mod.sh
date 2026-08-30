@@ -66,9 +66,20 @@ while IFS= read -r file; do
     trap - EXIT
 done < <(find "${DIR}" -type f)
 
+if [[ ${MODS_DIR} == mods && -f release-please-config.json ]]; then
+    temporary="$(mktemp "${TMPDIR:-/tmp}/release-please-config.XXXXXX")"
+    trap 'rm -f "${temporary:-}"' EXIT
+    jq --arg path "${DIR}" --arg component "${ID}" '
+      .packages[$path] = {component: $component}
+      | .packages = (.packages | to_entries | sort_by(.key) | from_entries)
+    ' release-please-config.json >"${temporary}"
+    mv "${temporary}" release-please-config.json
+    trap - EXIT
+fi
+
 printf 'created %s\n\n' "${DIR}"
 printf '%s\n' 'next:'
 printf '  1. edit %s/README.md\n' "${DIR}"
 printf '%s\n' '  2. remove the unused oneshot or longrun service skeleton'
-printf '%s\n' '  3. add the mod to README.md and add a .changes/*.json fragment'
-printf '%s\n' '  4. open a pull request; aggregate CI discovers and tests the mod'
+printf '%s\n' '  3. add the mod to README.md and use a feat(...) pull request title'
+printf '%s\n' '  4. open the pull request; aggregate CI and Release Please discover the mod'

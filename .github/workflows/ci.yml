@@ -2,7 +2,6 @@ name: CI
 
 on:
   pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,7 +17,6 @@ jobs:
     outputs:
       matrix: ${{ steps.changes.outputs.matrix }}
       count: ${{ steps.changes.outputs.count }}
-      release: ${{ steps.changes.outputs.release }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -31,55 +29,25 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          RELEASE_APP_LOGIN: ${{ vars.RELEASE_APP_LOGIN }}
         run: |
-          if [[ ${EVENT} == pull_request ]]; then
-            base="${PR_BASE}"
-            head="${PR_HEAD}"
-          else
-            base="${BEFORE}"
-            head="${GITHUB_SHA}"
-            if [[ -z ${base} || ${base} =~ ^0+$ ]]; then
-              base="$(git rev-list --max-parents=0 "${head}")"
-            fi
-          fi
-          if [[ ${EVENT} == pull_request ]]; then
-            python3 ci/release.py validate --base "${base}" --head "${head}"
-          fi
+          [[ ${EVENT} == pull_request ]] || { echo "::error::CI only accepts pull_request events"; exit 1; }
+          base="${PR_BASE}"
+          head="${PR_HEAD}"
+          python3 ci/release.py validate-pr \
+            --base "${base}" --head "${head}" \
+            --title "${PR_TITLE}" --body "${PR_BODY}" \
+            --head-ref "${PR_HEAD_REF}" --head-repo "${PR_HEAD_REPO}" \
+            --repository "${GITHUB_REPOSITORY}" --author "${PR_AUTHOR}" \
+            --expected-release-author "${RELEASE_APP_LOGIN}"
           matrix="$(python3 ci/release.py affected --base "${base}" --head "${head}" | jq -c .)"
           count="$(jq '.include | length' <<<"${matrix}")"
-          if git diff --name-only "${base}" "${head}" | grep -qxF '.release/plan.json'; then
-            release=true
-            if [[ ${EVENT} == pull_request ]]; then
-              [[ ${PR_HEAD_REF} == release/next && ${PR_HEAD_REPO} == "${GITHUB_REPOSITORY}" ]] || {
-                echo "::error::.release/plan.json may only change through this repository's App-managed release/next branch"
-                exit 1
-              }
-              unexpected="$(git diff --name-only "${base}" "${head}" | grep -Ev \
-                '^(\.release/plan\.json|\.changes/[^/]+\.json|mods/[^/]+/[^/]+/(VERSION|CHANGELOG\.md))$' || true)"
-              [[ -z ${unexpected} ]] || {
-                printf '::error::release/next contains non-generated files:\n%s\n' "${unexpected}"
-                exit 1
-              }
-              if find .changes -maxdepth 1 -name '*.json' -type f | grep -q .; then
-                echo "::error::release/next did not consume every change fragment"
-                exit 1
-              fi
-              python3 ci/release.py verify-plan --base "${base}" --owner "${GITHUB_REPOSITORY_OWNER,,}"
-            else
-              python3 ci/release.py verify-plan --owner "${GITHUB_REPOSITORY_OWNER,,}"
-              source_sha="$(jq -r .source_sha .release/plan.json)"
-              git merge-base --is-ancestor "${source_sha}" "${head}" || {
-                echo "::error::release plan source ${source_sha} is not an ancestor of ${head}"
-                exit 1
-              }
-            fi
-          else
-            release=false
-          fi
           {
             echo "matrix=${matrix}"
             echo "count=${count}"
-            echo "release=${release}"
           } >> "$GITHUB_OUTPUT"
           jq . <<<"${matrix}"
 

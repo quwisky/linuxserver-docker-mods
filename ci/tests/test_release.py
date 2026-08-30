@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Behavior tests for the repository release command."""
+"""Behavior tests for the Release Please repository adapter."""
 
 from __future__ import annotations
 
@@ -27,11 +27,7 @@ class Repository:
 
     def git(self, *args: str) -> str:
         return subprocess.run(
-            ["git", *args],
-            cwd=self.root,
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
+            ["git", *args], cwd=self.root, check=True, text=True, stdout=subprocess.PIPE
         ).stdout.strip()
 
     def write(self, name: str, content: str = "") -> None:
@@ -70,214 +66,170 @@ class ReleaseCommandTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.repo.close()
 
-    def test_packages_use_directory_identity_and_platform_override(self) -> None:
-        add_mod(self.repo, "plex", "alpha")
-        add_mod(self.repo, "plex", "vaapi", "FROM --platform=linux/amd64 alpine:edge\n")
-        self.repo.write("mods/plex/vaapi/PLATFORMS", "linux/amd64\n")
-
-        result = self.repo.release("packages")
-
-        self.assertEqual(
-            json.loads(result.stdout),
-            [
-                {
-                    "app": "plex",
-                    "dir": "mods/plex/alpha",
-                    "id": "plex-alpha",
-                    "mod": "alpha",
-                    "platforms": "linux/amd64,linux/arm64",
-                    "version": "0.0.0",
-                },
-                {
-                    "app": "plex",
-                    "dir": "mods/plex/vaapi",
-                    "id": "plex-vaapi",
-                    "mod": "vaapi",
-                    "platforms": "linux/amd64",
-                    "version": "0.0.0",
-                },
-            ],
+    def validate(self, base: str, head: str, title: str, **overrides: str) -> subprocess.CompletedProcess[str]:
+        values = {
+            "body": "",
+            "head_ref": "feature",
+            "head_repo": "example/repo",
+            "repository": "example/repo",
+            "author": "maintainer",
+            "expected_release_author": "release-app[bot]",
+        }
+        values.update(overrides)
+        return self.repo.release(
+            "validate-pr",
+            "--base", base,
+            "--head", head,
+            "--title", values.get("title", title),
+            "--body", values["body"],
+            "--head-ref", values["head_ref"],
+            "--head-repo", values["head_repo"],
+            "--repository", values["repository"],
+            "--author", values["author"],
+            "--expected-release-author", values["expected_release_author"],
+            check=False,
         )
 
-    def test_affected_expands_a_shared_input_to_every_consumer(self) -> None:
+    def test_packages_use_directory_identity_and_platform_override(self) -> None:
+        add_mod(self.repo, "plex", "alpha")
+        add_mod(self.repo, "plex", "vaapi")
+        self.repo.write("mods/plex/vaapi/PLATFORMS", "linux/amd64\n")
+        packages = json.loads(self.repo.release("packages").stdout)
+        self.assertEqual([item["id"] for item in packages], ["plex-alpha", "plex-vaapi"])
+        self.assertEqual(packages[1]["platforms"], "linux/amd64")
+
+    def test_affected_expands_shared_input_to_every_consumer(self) -> None:
         shared = "shared/runtime"
-        add_mod(self.repo, "plex", "alpha", f"FROM scratch\nCOPY {shared} /runtime\n")
-        add_mod(self.repo, "qbittorrent", "beta", f"FROM scratch\nCOPY {shared} /runtime\n")
+        add_mod(self.repo, "plex", "alpha", f"FROM scratch\nCOPY {shared}/ /runtime/\n")
+        add_mod(self.repo, "qbittorrent", "beta", f"FROM scratch\nCOPY {shared}/ /runtime/\n")
         self.repo.write(f"{shared}/helper.sh", "old\n")
+        self.repo.release("shared-markers", "--write")
         base = self.repo.commit("initial")
         self.repo.write(f"{shared}/helper.sh", "new\n")
         head = self.repo.commit("change shared runtime")
-
-        result = self.repo.release("affected", "--base", base, "--head", head)
-
-        affected = json.loads(result.stdout)
+        affected = json.loads(
+            self.repo.release("affected", "--base", base, "--head", head).stdout
+        )
         self.assertEqual(
             [item["id"] for item in affected["include"]],
             ["plex-alpha", "qbittorrent-beta"],
         )
 
-    def test_validate_requires_release_intent_for_runtime_changes(self) -> None:
+    def test_shared_marker_check_rejects_stale_consumers(self) -> None:
+        add_mod(self.repo, "plex", "alpha", "FROM scratch\nCOPY shared/runtime/ /runtime/\n")
+        self.repo.write("shared/runtime/helper.sh", "old\n")
+        self.repo.release("shared-markers", "--write")
+        self.repo.write("shared/runtime/helper.sh", "new\n")
+        result = self.repo.release("shared-markers", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is stale", result.stderr)
+
+    def test_runtime_change_requires_releasable_title(self) -> None:
         add_mod(self.repo, "plex", "alpha")
         self.repo.write("mods/plex/alpha/root/run", "old\n")
         base = self.repo.commit("initial")
         self.repo.write("mods/plex/alpha/root/run", "new\n")
-        head = self.repo.commit("runtime change")
+        head = self.repo.commit("change")
+        invalid = self.validate(base, head, "chore(plex-alpha): adjust runtime")
+        valid = self.validate(base, head, "fix(plex-alpha): adjust runtime")
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertEqual(valid.returncode, 0, valid.stderr)
 
-        result = self.repo.release(
-            "validate", "--base", base, "--head", head, check=False
-        )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("plex-alpha has runtime changes but no release intent", result.stderr)
-
-    def test_validate_accepts_an_explicit_no_release_reason(self) -> None:
+    def test_releasable_title_rejects_metadata_only_package(self) -> None:
         add_mod(self.repo, "plex", "alpha")
         base = self.repo.commit("initial")
-        self.repo.write("mods/plex/alpha/Dockerfile", "FROM scratch # metadata only\n")
-        self.repo.write(
-            ".changes/base-digest.json",
-            json.dumps(
-                {
-                    "summary": "Refresh a pinned build input without changing shipped bytes.",
-                    "packages": {"plex-alpha": "none"},
-                }
-            ),
-        )
-        head = self.repo.commit("pin digest")
-
-        result = self.repo.release("validate", "--base", base, "--head", head)
-
-        self.assertEqual(result.stdout.strip(), "release intent is valid")
-
-    def test_plan_expands_shared_bumps_and_only_allows_stronger_overrides(self) -> None:
-        shared = "shared/runtime"
-        add_mod(self.repo, "plex", "alpha", f"FROM scratch\nCOPY {shared} /runtime\n")
-        add_mod(self.repo, "qbittorrent", "beta", f"FROM scratch\nCOPY {shared} /runtime\n")
-        self.repo.write(f"{shared}/helper.sh", "payload\n")
-        self.repo.write(
-            ".changes/shared.json",
-            json.dumps(
-                {
-                    "summary": "Add the shared recovery behavior.",
-                    "shared": {"runtime": "minor"},
-                    "packages": {"plex-alpha": "major"},
-                }
-            ),
-        )
-
-        result = self.repo.release("plan")
-
-        plan = json.loads(result.stdout)
-        self.assertEqual(
-            [(item["id"], item["previous_version"], item["version"]) for item in plan["packages"]],
-            [
-                ("plex-alpha", "0.0.0", "1.0.0"),
-                ("qbittorrent-beta", "0.0.0", "0.1.0"),
-            ],
-        )
-        self.assertEqual(plan["packages"][0]["notes"], ["Add the shared recovery behavior."])
-
-    def test_prepare_updates_package_history_and_consumes_fragments(self) -> None:
-        add_mod(self.repo, "plex", "alpha")
-        self.repo.write(
-            ".changes/fix.json",
-            json.dumps(
-                {
-                    "summary": "Correct startup ordering.",
-                    "packages": {"plex-alpha": "patch"},
-                }
-            ),
-        )
-
-        self.repo.release("prepare")
-
-        self.assertEqual((self.repo.root / "mods/plex/alpha/VERSION").read_text(), "0.0.1\n")
-        changelog = (self.repo.root / "mods/plex/alpha/CHANGELOG.md").read_text()
-        self.assertIn("## 0.0.1", changelog)
-        self.assertIn("- Correct startup ordering.", changelog)
-        self.assertFalse((self.repo.root / ".changes/fix.json").exists())
-        release_plan = json.loads((self.repo.root / ".release/plan.json").read_text())
-        self.assertEqual(release_plan["packages"][0]["version"], "0.0.1")
-
-    def test_plan_rejects_a_reviewed_candidate_mixed_with_another_change(self) -> None:
-        add_mod(self.repo, "plex", "vaapi")
-        candidate = {
-            "ref": "ghcr.io/example/plex-vaapi:candidate-vaapi-deadbeef",
-            "digest": f"sha256:{'a' * 64}",
-        }
-        self.repo.write(
-            ".changes/vaapi.json",
-            json.dumps(
-                {
-                    "summary": "Refresh the shipped VAAPI libraries.",
-                    "packages": {"plex-vaapi": "patch"},
-                    "candidates": {"plex-vaapi": candidate},
-                }
-            ),
-        )
-        self.repo.write(
-            ".changes/follow-up.json",
-            json.dumps(
-                {
-                    "summary": "Change another runtime input.",
-                    "packages": {"plex-vaapi": "patch"},
-                }
-            ),
-        )
-
-        result = self.repo.release("plan", check=False)
-
+        self.repo.write("mods/plex/alpha/README.md", "docs only\n")
+        head = self.repo.commit("docs")
+        result = self.validate(base, head, "fix(plex-alpha): clarify setup")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("rebuild one candidate from the combined change", result.stderr)
+        self.assertIn("no runtime or audited artifact", result.stderr)
 
-    def test_verify_plan_matches_the_base_fragments_exactly(self) -> None:
-        add_mod(self.repo, "plex", "alpha")
+    def test_renovate_alpine_digest_is_the_only_nonrelease_runtime_exception(self) -> None:
+        add_mod(self.repo, "plex", "vaapi-amdgpu-mod", "FROM alpine:edge\n")
+        base = self.repo.commit("initial")
         self.repo.write(
-            ".changes/fix.json",
-            json.dumps(
-                {
-                    "summary": "Correct startup ordering.",
-                    "packages": {"plex-alpha": "patch"},
-                }
-            ),
+            "mods/plex/vaapi-amdgpu-mod/Dockerfile",
+            f"FROM alpine:edge@sha256:{'a' * 64}\n",
         )
-        base = self.repo.commit("runtime change")
-        self.repo.release("prepare")
+        head = self.repo.commit("pin")
+        result = self.validate(base, head, "chore(deps): pin alpine digest")
+        self.assertEqual(result.returncode, 0, result.stderr)
 
-        valid = self.repo.release("verify-plan", "--base", base)
+    def test_release_as_footer_is_forbidden(self) -> None:
+        add_mod(self.repo, "plex", "alpha")
+        base = self.repo.commit("initial")
+        self.repo.write("mods/plex/alpha/root/run", "new\n")
+        head = self.repo.commit("change")
+        result = self.validate(
+            base, head, "fix(plex-alpha): adjust runtime", body="Release-As: 9.9.9"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Release-As overrides are forbidden", result.stderr)
 
-        self.assertEqual(valid.stdout.strip(), "release plan is valid")
-        plan_path = self.repo.root / ".release/plan.json"
-        plan = json.loads(plan_path.read_text(encoding="utf-8"))
-        plan["packages"][0]["notes"] = ["Unreviewed replacement note."]
-        plan_path.write_text(json.dumps(plan), encoding="utf-8")
-        invalid = self.repo.release("verify-plan", "--base", base, check=False)
+    def test_release_please_pr_requires_app_identity_and_generated_files(self) -> None:
+        add_mod(self.repo, "plex", "alpha")
+        self.repo.write(".release-please-manifest.json", "{}\n")
+        base = self.repo.commit("initial")
+        self.repo.write("mods/plex/alpha/VERSION", "1.0.0\n")
+        self.repo.write("mods/plex/alpha/CHANGELOG.md", "# Changelog\n\n## 1.0.0\n")
+        self.repo.write(".release-please-manifest.json", '{"mods/plex/alpha":"1.0.0"}\n')
+        head = self.repo.commit("release")
+        valid = self.validate(
+            base,
+            head,
+            "chore(master): release plex-alpha 1.0.0",
+            head_ref="release-please--branches--master",
+            author="release-app[bot]",
+        )
+        invalid = self.validate(
+            base,
+            head,
+            "chore(master): release plex-alpha 1.0.0",
+            head_ref="release-please--branches--master",
+            author="maintainer",
+        )
+        self.assertEqual(valid.returncode, 0, valid.stderr)
         self.assertNotEqual(invalid.returncode, 0)
-        self.assertIn("does not exactly match", invalid.stderr)
 
-    def test_verify_plan_rejects_a_candidate_for_another_package(self) -> None:
-        add_mod(self.repo, "plex", "alpha")
+    def test_release_matrix_discovers_draft_and_reuses_new_vaapi_candidate(self) -> None:
+        add_mod(self.repo, "plex", "vaapi-amdgpu-mod")
+        source = self.repo.commit("runtime source")
+        fingerprint = f"sha256:{'b' * 64}"
+        candidate_digest = f"sha256:{'c' * 64}"
+        directory = "mods/plex/vaapi-amdgpu-mod"
         self.repo.write(
-            ".changes/fix.json",
+            f"{directory}/VAAPI-FINGERPRINT.json",
+            json.dumps({"fingerprint": fingerprint}) + "\n",
+        )
+        self.repo.write(
+            f"{directory}/VAAPI-CANDIDATE.json",
             json.dumps(
                 {
-                    "summary": "Correct startup ordering.",
-                    "packages": {"plex-alpha": "patch"},
+                    "fingerprint": fingerprint,
+                    "ref": "ghcr.io/example/plex-vaapi-amdgpu-mod:candidate-vaapi-test",
+                    "digest": candidate_digest,
+                    "source_sha": source,
                 }
-            ),
+            )
+            + "\n",
         )
-        self.repo.commit("runtime change")
-        self.repo.release("prepare")
-        plan_path = self.repo.root / ".release/plan.json"
-        plan = json.loads(plan_path.read_text(encoding="utf-8"))
-        plan["packages"][0]["candidate_ref"] = "ghcr.io/example/plex-other:candidate-vaapi-bad"
-        plan["packages"][0]["candidate_digest"] = f"sha256:{'a' * 64}"
-        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        self.repo.write(f"{directory}/VERSION", "1.0.0\n")
+        self.repo.commit("release metadata")
+        self.repo.git("tag", "plex-vaapi-amdgpu-mod/v1.0.0")
+        releases = self.repo.root / "releases.json"
+        releases.write_text(
+            json.dumps([[{"draft": True, "tag_name": "plex-vaapi-amdgpu-mod/v1.0.0"}]]),
+            encoding="utf-8",
+        )
 
-        result = self.repo.release("verify-plan", "--owner", "example", check=False)
+        result = self.repo.release(
+            "release-matrix", "--releases", os.fspath(releases), "--owner", "example"
+        )
 
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("invalid candidate ref", result.stderr)
+        item = json.loads(result.stdout)["include"][0]
+        self.assertEqual(item["version"], "1.0.0")
+        self.assertEqual(item["candidate_digest"], candidate_digest)
+        self.assertEqual(item["source_sha"], self.repo.git("rev-parse", "HEAD"))
 
 
 if __name__ == "__main__":
