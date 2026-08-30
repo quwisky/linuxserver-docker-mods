@@ -224,6 +224,35 @@ def signal_packages(packages: list[Package], paths: Iterable[str]) -> set[str]:
     }
 
 
+def bootstrap_packages(repo: Path, packages: list[Package], base: str, head: str) -> set[str]:
+    """Return packages receiving their one-time release metadata bootstrap."""
+    result: set[str] = set()
+    for package in packages:
+        metadata = [f"{package.dir}/VERSION", f"{package.dir}/CHANGELOG.md"]
+        absent_at_base = all(
+            subprocess.run(
+                ["git", "cat-file", "-e", f"{base}:{path}"],
+                cwd=repo,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            for path in metadata
+        )
+        present_at_head = all(
+            subprocess.run(
+                ["git", "cat-file", "-e", f"{head}:{path}"],
+                cwd=repo,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            == 0
+            for path in metadata
+        )
+        if absent_at_base and present_at_head:
+            result.add(package.id)
+    return result
+
+
 def affected_packages(repo: Path, base: str, head: str, runtime_only: bool) -> dict[str, Any]:
     packages = discover_packages(repo)
     by_shared = consumers(repo, packages)
@@ -316,7 +345,9 @@ def validate_pr(
     releasable = commit_type in {"feat", "fix"} or breaking
     packages = discover_packages(repo)
     runtime = runtime_packages(repo, packages, paths)
-    relevant = runtime | signal_packages(packages, paths)
+    relevant = runtime | signal_packages(packages, paths) | bootstrap_packages(
+        repo, packages, base, head
+    )
     routed = routed_packages(packages, paths)
     if releasable:
         if not relevant:

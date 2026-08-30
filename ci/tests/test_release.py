@@ -144,6 +144,19 @@ class ReleaseCommandTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no runtime or audited artifact", result.stderr)
 
+    def test_initial_release_metadata_is_a_one_time_release_signal(self) -> None:
+        add_mod(self.repo, "plex", "alpha")
+        (self.repo.root / "mods/plex/alpha/VERSION").unlink()
+        (self.repo.root / "mods/plex/alpha/CHANGELOG.md").unlink()
+        base = self.repo.commit("pre-release repository")
+        self.repo.write("mods/plex/alpha/VERSION", "0.0.0\n")
+        self.repo.write("mods/plex/alpha/CHANGELOG.md", "# Changelog\n")
+        head = self.repo.commit("bootstrap release metadata")
+
+        result = self.validate(base, head, "feat(ci): bootstrap package releases")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_renovate_alpine_digest_is_the_only_nonrelease_runtime_exception(self) -> None:
         add_mod(self.repo, "plex", "vaapi-amdgpu-mod", "FROM alpine:edge\n")
         base = self.repo.commit("initial")
