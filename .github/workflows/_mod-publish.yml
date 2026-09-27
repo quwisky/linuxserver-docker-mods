@@ -327,14 +327,14 @@ jobs:
           output-file: sbom.spdx.json
           artifact-name: ${{ env.ID }}-${{ env.RELEASE_VERSION }}-sbom.spdx.json
 
-      - uses: actions/attest-build-provenance@v3
+      - uses: actions/attest-build-provenance@v4
         if: steps.candidate.outputs.build == 'true'
         with:
           subject-name: ${{ steps.candidate.outputs.package }}
           subject-digest: ${{ steps.digest.outputs.value }}
           push-to-registry: true
 
-      - uses: actions/attest-sbom@v3
+      - uses: actions/attest-sbom@v4
         if: inputs.release-version != ''
         with:
           subject-name: ${{ steps.candidate.outputs.package }}

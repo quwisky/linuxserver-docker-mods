@@ -121,7 +121,7 @@ jobs:
             -f "${DIR}/Dockerfile" -t "local/${ID}:source" .
           docker run --rm "local/${ID}:source" sh -c 'apk info -v | LC_ALL=C sort' \
             >"${RUNNER_TEMP}/VAAPI-PACKAGES.txt"
-      - uses: actions/attest-build-provenance@v3
+      - uses: actions/attest-build-provenance@v4
         if: steps.fingerprint.outputs.changed == 'true' && steps.fingerprint.outputs.bootstrap != 'true'
         with:
           subject-name: ghcr.io/${{ steps.owner.outputs.name }}/${{ env.ID }}
